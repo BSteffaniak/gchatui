@@ -7,21 +7,25 @@ use bmux_tui::buffer::Buffer;
 use bmux_tui::crossterm::{CrosstermTerminalGuard, terminal_size};
 use bmux_tui::event::{Event, MouseButton, MouseEventKind};
 use bmux_tui::frame::Frame;
-use bmux_tui::geometry::Rect;
+use bmux_tui::geometry::{Insets, Rect};
 use bmux_tui::hit::HitMap;
 use bmux_tui::interaction::InteractionRouter;
-use bmux_tui::prelude::Line;
+use bmux_tui::prelude::{Color, Line, Modifier, Span, Style};
 use bmux_tui::terminal::Terminal;
-use bmux_tui_components::button::{Button, ButtonOutcome, ButtonState};
-use bmux_tui_components::key_hint_bar::{KeyHint, KeyHintBar};
-use bmux_tui_components::pane::{Pane, PaneMousePolicy, PaneOutcome, PanePolicy, PaneState};
+use bmux_tui_components::button::{Button, ButtonOutcome, ButtonState, ButtonStyles};
+use bmux_tui_components::key_hint_bar::{KeyHint, KeyHintBar, KeyHintBarPolicy, KeyHintBarStyles};
+use bmux_tui_components::pane::{
+    Pane, PaneMousePolicy, PaneOutcome, PanePolicy, PaneState, PaneStyles,
+};
 use bmux_tui_components::scroll_area::ScrollAreaScrollbarMode;
 use bmux_tui_components::selectable_list::{
-    SelectableList, SelectableListItem, SelectableListOutcome, SelectableListPolicy,
-    SelectableListState,
+    SelectableList, SelectableListHighlightPolicy, SelectableListItem, SelectableListOutcome,
+    SelectableListPolicy, SelectableListState, SelectableListStyles,
 };
-use bmux_tui_components::status_bar::{StatusBar, StatusSegment};
-use bmux_tui_components::text_view::{TextView, TextViewOutcome, TextViewState};
+use bmux_tui_components::status_bar::{
+    StatusBar, StatusBarPolicy, StatusBarStyles, StatusSegment, StatusSeverity,
+};
+use bmux_tui_components::text_view::{TextView, TextViewOutcome, TextViewState, TextViewStyles};
 use bmux_tui_runtime::{
     Command, CommandKey, Lifecycle, Program, Runtime, RuntimeConfig, RuntimeEvent, TerminalInput,
     TerminalPresenter, Update,
@@ -31,6 +35,19 @@ use crate::chat::ChatClient;
 use crate::credential::Secret;
 use crate::keybind::{Action, KeybindingRegistry};
 use crate::product::{Effect, Phase, ProductMessage, ProductState};
+
+const CANVAS: Color = Color::Rgb(10, 14, 24);
+const SURFACE: Color = Color::Rgb(16, 23, 38);
+const SURFACE_RAISED: Color = Color::Rgb(24, 34, 53);
+const BORDER: Color = Color::Rgb(52, 67, 91);
+const TEXT: Color = Color::Rgb(226, 232, 240);
+const MUTED: Color = Color::Rgb(125, 140, 165);
+const ACCENT: Color = Color::Rgb(99, 179, 237);
+const ACCENT_STRONG: Color = Color::Rgb(56, 189, 248);
+const SELECTED_BG: Color = Color::Rgb(25, 64, 92);
+const SUCCESS: Color = Color::Rgb(74, 222, 128);
+const WARNING: Color = Color::Rgb(251, 191, 36);
+const ERROR: Color = Color::Rgb(248, 113, 113);
 
 #[derive(Debug)]
 pub enum AppMessage {
@@ -189,7 +206,7 @@ impl App {
 
         let help = Button::new("Help");
         let help_outcome = help.handle_event(
-            help_button_area(self.space_pane.area),
+            help_button_area(footer_area(self)),
             &mut self.help_button,
             &event,
         );
@@ -395,7 +412,36 @@ fn displayed_spaces(app: &App) -> Vec<SelectableListItem> {
     app.product
         .spaces
         .iter()
-        .map(|space| SelectableListItem::new(space.id.0.clone(), space.display_name.clone()))
+        .map(|space| {
+            let icon = match space.kind {
+                crate::model::SpaceKind::DirectMessage => "●",
+                crate::model::SpaceKind::GroupChat => "◆",
+                crate::model::SpaceKind::Space => "#",
+                crate::model::SpaceKind::Unknown => "·",
+            };
+            let kind = match space.kind {
+                crate::model::SpaceKind::DirectMessage => "DIRECT MESSAGE",
+                crate::model::SpaceKind::GroupChat => "GROUP CHAT",
+                crate::model::SpaceKind::Space => "SPACE",
+                crate::model::SpaceKind::Unknown => "CONVERSATION",
+            };
+            SelectableListItem::multiline(
+                space.id.0.clone(),
+                vec![
+                    Line::from_spans(vec![
+                        Span::styled(format!("{icon} "), Style::new().fg(ACCENT_STRONG)),
+                        Span::styled(
+                            space.display_name.clone(),
+                            Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from_spans(vec![Span::styled(
+                        format!("  {kind}"),
+                        Style::new().fg(MUTED),
+                    )]),
+                ],
+            )
+        })
         .collect()
 }
 
@@ -415,7 +461,14 @@ fn conversation_lines(app: &App) -> Vec<Line> {
         let thread = message.thread_id.as_ref().map(|thread| thread.0.as_str());
         if thread != current_thread {
             if let Some(thread) = thread {
-                lines.push(Line::from(format!("Thread {}", short_id(thread))));
+                lines.push(Line::from_spans(vec![
+                    Span::styled("┌─ ", Style::new().fg(BORDER)),
+                    Span::styled(
+                        format!("THREAD {}", short_id(thread).to_uppercase()),
+                        Style::new().fg(MUTED).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" ─", Style::new().fg(BORDER)),
+                ]));
             }
             current_thread = thread;
         }
@@ -424,13 +477,22 @@ fn conversation_lines(app: &App) -> Vec<Line> {
             .as_ref()
             .map_or("Unknown sender", |sender| sender.display_name.as_str());
         let indent = if thread.is_some() { "  " } else { "" };
-        lines.push(Line::from(format!(
-            "{indent}{sender}  {}",
-            message.create_time
-        )));
-        lines.push(Line::from(format!("{indent}{}", message.text)));
+        lines.push(Line::from_spans(vec![
+            Span::styled(
+                format!("{indent}{sender}"),
+                Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", message.create_time), Style::new().fg(MUTED)),
+        ]));
+        lines.push(Line::from_spans(vec![Span::styled(
+            format!("{indent}{}", message.text),
+            Style::new().fg(TEXT),
+        )]));
         if message.unsupported_content {
-            lines.push(Line::from(format!("{indent}[Unsupported rich content]")));
+            lines.push(Line::from_spans(vec![Span::styled(
+                format!("{indent}◇ Rich content is not available in the terminal"),
+                Style::new().fg(WARNING),
+            )]));
         }
         lines.push(Line::from(""));
     }
@@ -441,8 +503,12 @@ fn short_id(value: &str) -> &str {
     value.rsplit('/').next().unwrap_or(value)
 }
 
+#[allow(clippy::too_many_lines)]
 fn render(app: &mut App, frame: &mut Frame<'_>) {
     let area = frame.area();
+    frame
+        .buffer_mut()
+        .fill(area, " ", Style::new().bg(CANVAS).fg(TEXT));
     if area.width < 20 || area.height < 6 {
         frame.buffer_mut().write_line(
             Rect::new(area.x, area.y, area.width, 1),
@@ -451,13 +517,22 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         return;
     }
 
-    let body_height = area.height.saturating_sub(2);
-    let spaces_width = (area.width / 3).clamp(18, 32);
-    let spaces_area = Rect::new(area.x, area.y, spaces_width, body_height);
+    let header_height = 2;
+    let footer_height = 2;
+    let body_height = area.height.saturating_sub(header_height + footer_height);
+    render_header(
+        app,
+        frame,
+        Rect::new(area.x, area.y, area.width, header_height),
+    );
+    let body_y = area.y.saturating_add(header_height);
+    let spaces_width = (area.width / 3).clamp(22, 38);
+    let gap = u16::from(area.width >= 70);
+    let spaces_area = Rect::new(area.x, body_y, spaces_width, body_height);
     let conversation_area = Rect::new(
-        area.x.saturating_add(spaces_width),
-        area.y,
-        area.width.saturating_sub(spaces_width),
+        area.x.saturating_add(spaces_width).saturating_add(gap),
+        body_y,
+        area.width.saturating_sub(spaces_width).saturating_sub(gap),
         body_height,
     );
     app.space_pane.area = spaces_area;
@@ -465,79 +540,315 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
 
     let pane = interactive_pane();
     pane.clone()
-        .title("Spaces")
+        .title(Line::from_spans(vec![
+            Span::styled(
+                "  CONVERSATIONS",
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", app.product.spaces.len()),
+                Style::new().fg(MUTED),
+            ),
+        ]))
         .render_with_id("spaces-pane", &app.space_pane, frame);
-    pane.title("Conversation")
-        .render_with_id("conversation-pane", &app.conversation_pane, frame);
+    pane.title(Line::from_spans(vec![
+        Span::styled(
+            "  MESSAGES",
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(selected_space_label(app), Style::new().fg(MUTED)),
+    ]))
+    .render_with_id("conversation-pane", &app.conversation_pane, frame);
 
     let spaces = displayed_spaces(app);
     spaces_list(&spaces).render(space_list_area(spaces_area), &app.spaces, frame);
 
     let conversation = conversation_lines(app);
-    TextView::new(&conversation).render(
-        conversation_content_area(conversation_area),
-        &app.conversation_view,
-        frame,
-    );
+    TextView::new(&conversation)
+        .styles(TextViewStyles {
+            text: Style::new().fg(TEXT).bg(SURFACE),
+            empty: Style::new().fg(MUTED).bg(SURFACE),
+            background: Style::new().bg(SURFACE),
+        })
+        .render(
+            conversation_content_area(conversation_area),
+            &app.conversation_view,
+            frame,
+        );
 
+    let footer_y = area
+        .y
+        .saturating_add(header_height)
+        .saturating_add(body_height);
     let hint_labels = hints(app);
     let hints = hint_labels
         .iter()
         .map(|(key, label)| KeyHint::new(key, label))
         .collect::<Vec<_>>();
-    KeyHintBar::new(&hints).render(
-        Rect::new(area.x, area.y.saturating_add(body_height), area.width, 1),
-        frame,
-    );
-    Button::new("Help").render_with_id(
-        "help-button",
-        help_button_area(spaces_area),
-        &app.help_button,
-        frame,
-    );
+    KeyHintBar::new(&hints)
+        .policy(KeyHintBarPolicy::compact())
+        .styles(key_hint_styles())
+        .render(Rect::new(area.x, footer_y, area.width, 1), frame);
+    Button::new("  ? HELP  ")
+        .styles(button_styles())
+        .render_with_id(
+            "help-button",
+            help_button_area(Rect::new(area.x, footer_y, area.width, 1)),
+            &app.help_button,
+            frame,
+        );
     if app.help_visible {
         render_help(app, frame, conversation_area);
     }
-    let status = [StatusSegment::new(if app.help_visible {
-        "Help is visible"
-    } else {
-        "Read-only prototype"
-    })];
-    StatusBar::new().left(&status).render(
+    let status_text = status_text(app);
+    let severity = status_severity(app.product.phase);
+    let status = [StatusSegment::new(status_text).severity(severity)];
+    let right = [StatusSegment::new("READ ONLY").severity(StatusSeverity::Muted)];
+    StatusBar::new()
+        .left(&status)
+        .right(&right)
+        .policy(StatusBarPolicy::compact().background(true))
+        .styles(status_styles())
+        .render(
+            Rect::new(area.x, footer_y.saturating_add(1), area.width, 1),
+            frame,
+        );
+}
+
+fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    frame
+        .buffer_mut()
+        .fill(area, " ", Style::new().bg(SURFACE_RAISED));
+    frame.buffer_mut().write_line(
         Rect::new(
-            area.x,
-            area.y.saturating_add(body_height).saturating_add(1),
-            area.width,
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(2),
             1,
         ),
-        frame,
+        &Line::from_spans(vec![
+            Span::styled(
+                "gchat",
+                Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("ui", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled("  /  terminal conversations", Style::new().fg(MUTED)),
+        ]),
+    );
+    frame.buffer_mut().write_line(
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            1,
+        ),
+        &Line::from_spans(vec![
+            Span::styled("● ", Style::new().fg(status_color(app.product.phase))),
+            Span::styled(status_text(app), Style::new().fg(MUTED)),
+        ]),
     );
 }
 
-const fn conversation_content_area(area: Rect) -> Rect {
-    Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    )
+fn selected_space_label(app: &App) -> String {
+    app.product
+        .selected_space
+        .as_deref()
+        .and_then(|id| app.product.spaces.iter().find(|space| space.id.0 == id))
+        .map_or_else(String::new, |space| format!("  /  {}", space.display_name))
+}
+
+const fn status_text(app: &App) -> &'static str {
+    if app.help_visible {
+        return "Help overlay open";
+    }
+    match app.product.phase {
+        Phase::MissingConfiguration => "Configure OAuth to connect",
+        Phase::VaultSetup => "Creating secure local credentials",
+        Phase::Unlock => "Unlocking local credentials",
+        Phase::Login => "Waiting for Google authorization",
+        Phase::LoadingSpaces => "Loading conversations…",
+        Phase::Ready => "Connected",
+        Phase::LoadingMessages => "Loading messages…",
+        Phase::Refreshing => "Refreshing…",
+        Phase::Empty => "Nothing here yet",
+        Phase::RecoverableError => "Connection issue — press refresh to retry",
+        Phase::Reauthentication => "Authorization expired — sign in again",
+        Phase::FatalError => "gchatui encountered a fatal error",
+    }
+}
+
+const fn status_severity(phase: Phase) -> StatusSeverity {
+    match phase {
+        Phase::Ready => StatusSeverity::Success,
+        Phase::RecoverableError | Phase::Reauthentication => StatusSeverity::Warning,
+        Phase::FatalError => StatusSeverity::Error,
+        Phase::LoadingSpaces | Phase::LoadingMessages | Phase::Refreshing | Phase::Login => {
+            StatusSeverity::Info
+        }
+        Phase::MissingConfiguration | Phase::VaultSetup | Phase::Unlock | Phase::Empty => {
+            StatusSeverity::Muted
+        }
+    }
+}
+
+const fn status_color(phase: Phase) -> Color {
+    match phase {
+        Phase::Ready => SUCCESS,
+        Phase::RecoverableError | Phase::Reauthentication => WARNING,
+        Phase::FatalError => ERROR,
+        Phase::LoadingSpaces | Phase::LoadingMessages | Phase::Refreshing | Phase::Login => ACCENT,
+        Phase::MissingConfiguration | Phase::VaultSetup | Phase::Unlock | Phase::Empty => MUTED,
+    }
+}
+
+const fn pane_styles() -> PaneStyles {
+    PaneStyles {
+        background: Some(Style::new().bg(SURFACE)),
+        border: Style::new().fg(BORDER).bg(SURFACE),
+        focused_border: Style::new()
+            .fg(ACCENT_STRONG)
+            .bg(SURFACE)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+const fn list_styles() -> SelectableListStyles {
+    SelectableListStyles {
+        normal: Style::new().fg(TEXT).bg(SURFACE),
+        focused: Style::new()
+            .fg(TEXT)
+            .bg(SURFACE_RAISED)
+            .add_modifier(Modifier::BOLD),
+        selected: Style::new()
+            .fg(Color::BrightWhite)
+            .bg(SELECTED_BG)
+            .add_modifier(Modifier::BOLD),
+        hovered: Style::new().fg(Color::BrightWhite).bg(SURFACE_RAISED),
+        pressed: Style::new()
+            .fg(Color::Black)
+            .bg(ACCENT_STRONG)
+            .add_modifier(Modifier::BOLD),
+        disabled: Style::new()
+            .fg(MUTED)
+            .bg(SURFACE)
+            .add_modifier(Modifier::DIM),
+    }
+}
+
+const fn button_styles() -> ButtonStyles {
+    ButtonStyles {
+        normal: Style::new().fg(MUTED).bg(SURFACE_RAISED),
+        focused: Style::new()
+            .fg(Color::Black)
+            .bg(ACCENT_STRONG)
+            .add_modifier(Modifier::BOLD),
+        hovered: Style::new().fg(Color::BrightWhite).bg(SELECTED_BG),
+        pressed: Style::new()
+            .fg(Color::Black)
+            .bg(ACCENT)
+            .add_modifier(Modifier::BOLD),
+        disabled: Style::new()
+            .fg(MUTED)
+            .bg(SURFACE_RAISED)
+            .add_modifier(Modifier::DIM),
+    }
+}
+
+const fn key_hint_styles() -> KeyHintBarStyles {
+    KeyHintBarStyles {
+        key: Style::new()
+            .fg(ACCENT_STRONG)
+            .bg(SURFACE_RAISED)
+            .add_modifier(Modifier::BOLD),
+        label: Style::new().fg(MUTED).bg(SURFACE_RAISED),
+        separator: Style::new().fg(BORDER).bg(SURFACE_RAISED),
+        disabled: Style::new()
+            .fg(MUTED)
+            .bg(SURFACE_RAISED)
+            .add_modifier(Modifier::DIM),
+        background: Style::new().bg(SURFACE_RAISED),
+    }
+}
+
+const fn status_styles() -> StatusBarStyles {
+    StatusBarStyles {
+        default: Style::new().fg(TEXT).bg(SURFACE_RAISED),
+        muted: Style::new().fg(MUTED).bg(SURFACE_RAISED),
+        info: Style::new().fg(ACCENT).bg(SURFACE_RAISED),
+        success: Style::new().fg(SUCCESS).bg(SURFACE_RAISED),
+        warning: Style::new()
+            .fg(WARNING)
+            .bg(SURFACE_RAISED)
+            .add_modifier(Modifier::BOLD),
+        error: Style::new()
+            .fg(ERROR)
+            .bg(SURFACE_RAISED)
+            .add_modifier(Modifier::BOLD),
+        separator: Style::new().fg(BORDER).bg(SURFACE_RAISED),
+        background: Style::new().bg(SURFACE_RAISED),
+    }
+}
+
+fn conversation_content_area(area: Rect) -> Rect {
+    interactive_pane().inner_area(&PaneState::new(area))
 }
 
 fn spaces_list(items: &[SelectableListItem]) -> SelectableList<'_> {
     SelectableList::new(items)
-        .policy(SelectableListPolicy::interactive().scrollbar(ScrollAreaScrollbarMode::Gutter))
+        .policy(SelectableListPolicy {
+            highlight: SelectableListHighlightPolicy::new("▌", true),
+            ..SelectableListPolicy::interactive().scrollbar(ScrollAreaScrollbarMode::Gutter)
+        })
+        .styles(list_styles())
 }
 
-const fn help_button_area(spaces: Rect) -> Rect {
+const fn footer_area(app: &App) -> Rect {
     Rect::new(
-        spaces.x.saturating_add(spaces.width.saturating_sub(7)),
-        spaces.y,
-        6,
+        app.space_pane.area.x,
+        app.space_pane
+            .area
+            .y
+            .saturating_add(app.space_pane.area.height),
+        app.space_pane
+            .area
+            .width
+            .saturating_add(app.conversation_pane.area.width)
+            .saturating_add(1),
+        1,
+    )
+}
+
+const fn help_button_area(footer: Rect) -> Rect {
+    Rect::new(
+        footer.x.saturating_add(footer.width.saturating_sub(12)),
+        footer.y,
+        11,
         1,
     )
 }
 
 fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let overlay = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(2).min(10),
+    );
+    frame
+        .buffer_mut()
+        .fill(overlay, " ", Style::new().bg(SURFACE_RAISED));
+    frame.buffer_mut().write_line(
+        Rect::new(
+            overlay.x.saturating_add(2),
+            overlay.y,
+            overlay.width.saturating_sub(4),
+            1,
+        ),
+        &Line::from_spans(vec![Span::styled(
+            "KEYBOARD SHORTCUTS",
+            Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
+        )]),
+    );
     let rows = [
         Action::FocusNext,
         Action::MoveDown,
@@ -550,7 +861,7 @@ fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
         let Ok(index) = u16::try_from(index) else {
             break;
         };
-        if index.saturating_add(2) >= area.height {
+        if index.saturating_add(2) >= overlay.height {
             break;
         }
         let labels = app.bindings.labels_for(action).join(", ");
@@ -559,36 +870,40 @@ fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
         }
         frame.buffer_mut().write_line(
             Rect::new(
-                area.x.saturating_add(2),
-                area.y.saturating_add(2).saturating_add(index),
-                area.width.saturating_sub(4),
+                overlay.x.saturating_add(2),
+                overlay.y.saturating_add(2).saturating_add(index),
+                overlay.width.saturating_sub(4),
                 1,
             ),
-            &Line::from(format!("{labels:<16} {}", action.label())),
+            &Line::from_spans(vec![
+                Span::styled(
+                    format!("{labels:<16}"),
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(action.label(), Style::new().fg(TEXT)),
+            ]),
         );
     }
 }
 
-const fn space_list_area(area: Rect) -> Rect {
-    Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    )
+fn space_list_area(area: Rect) -> Rect {
+    interactive_pane().inner_area(&PaneState::new(area))
 }
 
 fn interactive_pane() -> Pane<'static> {
-    Pane::new().policy(PanePolicy {
-        mouse: PaneMousePolicy {
-            enabled: true,
-            click_to_focus: true,
-            title_bar_drag: false,
-            scroll_wheel: false,
-            resize_handles: bmux_tui_components::pane::ResizeHandles::NONE,
-        },
-        ..PanePolicy::default()
-    })
+    Pane::new()
+        .padding(Insets::new(1, 1, 0, 1))
+        .styles(pane_styles())
+        .policy(PanePolicy {
+            mouse: PaneMousePolicy {
+                enabled: true,
+                click_to_focus: true,
+                title_bar_drag: false,
+                scroll_wheel: false,
+                resize_handles: bmux_tui_components::pane::ResizeHandles::NONE,
+            },
+            ..PanePolicy::default()
+        })
 }
 
 #[cfg(test)]
@@ -652,7 +967,7 @@ mod tests {
             .map(Line::plain_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("Thread example-thread"));
+        assert!(rendered.contains("THREAD example-thread".to_uppercase().as_str()));
         assert!(rendered.contains("  Example User"));
         assert!(rendered.contains("  Synthetic reply"));
     }
@@ -681,10 +996,10 @@ mod tests {
             .filter_map(|row| buffer.row_symbols(row))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("Spaces"));
+        assert!(rendered.contains("CONVERSATIONS"));
         assert!(rendered.contains("Example Space"));
-        assert!(rendered.contains("Conversation"));
-        assert!(rendered.contains("Help"));
+        assert!(rendered.contains("MESSAGES"));
+        assert!(rendered.contains("HELP"));
         assert!(rendered.contains("Quit"));
     }
 
@@ -710,12 +1025,19 @@ mod tests {
     fn help_button_and_help_rows_use_active_registry() {
         let mut app = App::new(KeybindingRegistry::default());
         let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 20));
-        let area = help_button_area(app.space_pane.area);
-        let point = Point::new(area.x, area.y);
+        let footer_y = app
+            .space_pane
+            .area
+            .y
+            .saturating_add(app.space_pane.area.height);
+        let area = help_button_area(footer_area(&app));
+        assert_eq!(area.y, footer_y);
+        let point = Point::new(area.x.saturating_add(2), area.y);
         let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
             MouseEventKind::Down(MouseButton::Left),
             point,
         )));
+        assert!(app.help_button.interaction.pressed);
         let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
             MouseEventKind::Up(MouseButton::Left),
             point,
@@ -755,7 +1077,8 @@ mod tests {
         }];
         app.product.phase = Phase::Ready;
         let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 20));
-        let point = Point::new(3, 1);
+        let list_area = space_list_area(app.space_pane.area);
+        let point = Point::new(list_area.x.saturating_add(2), list_area.y);
         let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
             MouseEventKind::Down(MouseButton::Left),
             point,
@@ -784,7 +1107,8 @@ mod tests {
     fn mouse_click_selects_space_and_keyboard_continues_from_it() {
         let mut app = App::new(KeybindingRegistry::default());
         let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 20));
-        let point = Point::new(2, 3);
+        let list_area = space_list_area(app.space_pane.area);
+        let point = Point::new(list_area.x.saturating_add(2), list_area.y.saturating_add(4));
         let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
             MouseEventKind::Down(MouseButton::Left),
             point,
@@ -793,11 +1117,11 @@ mod tests {
             MouseEventKind::Up(MouseButton::Left),
             point,
         )));
-        assert_eq!(app.spaces.selected(), Some(2));
+        assert_eq!(app.spaces.selected(), Some(4));
 
         let down = "j".parse::<crate::keybind::KeyChord>().unwrap();
         let _ = app.update_terminal(Event::Key(down.stroke()));
-        assert_eq!(app.spaces.focused(), Some(3));
-        assert_eq!(app.spaces.selected(), Some(3));
+        assert_eq!(app.spaces.focused(), Some(5));
+        assert_eq!(app.spaces.selected(), Some(5));
     }
 }
