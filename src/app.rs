@@ -5,7 +5,7 @@ use anyhow::Result;
 #[cfg(test)]
 use bmux_tui::buffer::Buffer;
 use bmux_tui::crossterm::{CrosstermTerminalGuard, terminal_size};
-use bmux_tui::event::Event;
+use bmux_tui::event::{Event, MouseButton, MouseEventKind};
 use bmux_tui::frame::Frame;
 use bmux_tui::geometry::Rect;
 use bmux_tui::hit::HitMap;
@@ -78,6 +78,12 @@ impl App {
         }
     }
 
+    const fn focus_spaces_pane(&mut self) {
+        self.focused_pane = FocusedPane::Spaces;
+        self.space_pane.interaction.focused = true;
+        self.conversation_pane.interaction.focused = false;
+    }
+
     fn command_for_effect(&self, effect: Effect) -> Option<Command<AppMessage>> {
         let token = self.access_token.clone()?;
         let chat = Arc::clone(&self.chat);
@@ -125,17 +131,41 @@ impl App {
         }
 
         let spaces = displayed_spaces(self);
-        match spaces_list(&spaces).handle_event(
+        let mut list_outcome = spaces_list(&spaces).handle_event(
             space_list_area(self.space_pane.area),
             &mut self.spaces,
             &event,
-        ) {
-            SelectableListOutcome::Selected(_)
-            | SelectableListOutcome::Focused(_)
-            | SelectableListOutcome::Redraw => {
-                self.focused_pane = FocusedPane::Spaces;
-                self.space_pane.interaction.focused = true;
-                self.conversation_pane.interaction.focused = false;
+        );
+        if matches!(
+            event,
+            Event::Mouse(bmux_tui::event::MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..
+            })
+        ) && matches!(list_outcome, SelectableListOutcome::Ignored)
+            && let Event::Mouse(mouse) = event
+            && space_list_area(self.space_pane.area).contains(mouse.position)
+            && let Some(index) = self.spaces.selected()
+        {
+            list_outcome = SelectableListOutcome::Selected(index);
+        }
+        match list_outcome {
+            SelectableListOutcome::Selected(index) => {
+                self.focus_spaces_pane();
+                let effect = self
+                    .product
+                    .spaces
+                    .get(index)
+                    .map(|space| space.id.0.clone())
+                    .map(|space_name| self.product.select_space(space_name));
+                return effect
+                    .and_then(|effect| self.command_for_effect(effect))
+                    .map_or_else(Update::reset, |command| {
+                        Update::reset().with_command(command)
+                    });
+            }
+            SelectableListOutcome::Focused(_) | SelectableListOutcome::Redraw => {
+                self.focus_spaces_pane();
                 return Update::reset();
             }
             SelectableListOutcome::Ignored => {}
@@ -710,6 +740,41 @@ mod tests {
             )));
         }
         assert!(app.spaces.vertical_scroll() > 0);
+    }
+
+    #[test]
+    fn selecting_real_space_opens_conversation_for_mouse_and_keyboard() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.spaces = vec![crate::model::Space {
+            id: crate::model::SpaceId("spaces/example".to_string()),
+            display_name: "Example Space".to_string(),
+            kind: crate::model::SpaceKind::Space,
+        }];
+        app.product.phase = Phase::Ready;
+        let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 20));
+        let point = Point::new(3, 1);
+        let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
+            MouseEventKind::Down(MouseButton::Left),
+            point,
+        )));
+        let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
+            MouseEventKind::Up(MouseButton::Left),
+            point,
+        )));
+        assert_eq!(
+            app.product.selected_space.as_deref(),
+            Some("spaces/example")
+        );
+        assert_eq!(app.product.phase, Phase::LoadingMessages);
+
+        app.product.phase = Phase::Ready;
+        let enter = "Enter".parse::<crate::keybind::KeyChord>().unwrap();
+        let _ = app.update_terminal(Event::Key(enter.stroke()));
+        assert_eq!(
+            app.product.selected_space.as_deref(),
+            Some("spaces/example")
+        );
+        assert_eq!(app.product.phase, Phase::LoadingMessages);
     }
 
     #[test]
