@@ -74,7 +74,10 @@ pub fn load_keybindings(path: Option<&Path>) -> Result<KeybindingRegistry, Confi
 }
 
 pub fn default_state_dir() -> Option<PathBuf> {
-    dirs::state_dir().map(|directory| directory.join("gchatui"))
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .or_else(dirs::data_dir)
+        .map(|directory| directory.join("gchatui"))
 }
 
 pub fn default_config_path() -> Option<PathBuf> {
@@ -86,6 +89,12 @@ mod tests {
     use super::*;
     use crate::keybind::Action;
     use tempfile::tempdir;
+
+    #[test]
+    fn macos_has_a_state_directory_fallback() {
+        #[cfg(target_os = "macos")]
+        assert!(default_state_dir().is_some());
+    }
 
     #[test]
     fn absent_file_uses_defaults() {

@@ -123,33 +123,22 @@ impl App {
         }
     }
 
-    fn update_terminal(&mut self, event: Event) -> Update<AppMessage> {
-        if let Event::Key(stroke) = event
-            && let Some(action) = self.bindings.action_for(stroke)
-        {
-            return self.apply_action(action);
-        }
-
+    fn handle_space_event(&mut self, event: &Event) -> Option<Update<AppMessage>> {
         let spaces = displayed_spaces(self);
-        let mut list_outcome = spaces_list(&spaces).handle_event(
+        let mut outcome = spaces_list(&spaces).handle_event(
             space_list_area(self.space_pane.area),
             &mut self.spaces,
-            &event,
-        );
-        if matches!(
             event,
-            Event::Mouse(bmux_tui::event::MouseEvent {
-                kind: MouseEventKind::Up(MouseButton::Left),
-                ..
-            })
-        ) && matches!(list_outcome, SelectableListOutcome::Ignored)
-            && let Event::Mouse(mouse) = event
+        );
+        if let Event::Mouse(mouse) = event
+            && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && matches!(outcome, SelectableListOutcome::Ignored)
             && space_list_area(self.space_pane.area).contains(mouse.position)
             && let Some(index) = self.spaces.selected()
         {
-            list_outcome = SelectableListOutcome::Selected(index);
+            outcome = SelectableListOutcome::Selected(index);
         }
-        match list_outcome {
+        match outcome {
             SelectableListOutcome::Selected(index) => {
                 self.focus_spaces_pane();
                 let effect = self
@@ -158,17 +147,31 @@ impl App {
                     .get(index)
                     .map(|space| space.id.0.clone())
                     .map(|space_name| self.product.select_space(space_name));
-                return effect
-                    .and_then(|effect| self.command_for_effect(effect))
-                    .map_or_else(Update::reset, |command| {
-                        Update::reset().with_command(command)
-                    });
+                Some(
+                    effect
+                        .and_then(|effect| self.command_for_effect(effect))
+                        .map_or_else(Update::reset, |command| {
+                            Update::reset().with_command(command)
+                        }),
+                )
             }
             SelectableListOutcome::Focused(_) | SelectableListOutcome::Redraw => {
                 self.focus_spaces_pane();
-                return Update::reset();
+                Some(Update::reset())
             }
-            SelectableListOutcome::Ignored => {}
+            SelectableListOutcome::Ignored => None,
+        }
+    }
+
+    fn update_terminal(&mut self, event: Event) -> Update<AppMessage> {
+        if let Event::Key(stroke) = event
+            && let Some(action) = self.bindings.action_for(stroke)
+        {
+            return self.apply_action(action);
+        }
+
+        if let Some(update) = self.handle_space_event(&event) {
+            return update;
         }
 
         let conversation_lines = conversation_lines(self);
