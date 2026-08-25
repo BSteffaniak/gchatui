@@ -6,7 +6,10 @@ messages.
 
 - Access tokens remain in protected process memory.
 - Persistent mode stores the refresh token in an app-specific encrypted sshenv
-  vault.
+  vault. By default, a passphrase protects the generated app identity.
+- Setting `vault_passphrase = false` opts into prompt-free persistent startup. The
+  vault remains encrypted, but the app identity is protected only by current-user
+  filesystem permissions; copying both state files permits token recovery.
 - Session-only mode writes no token or generated identity to disk.
 - Plaintext persistence is never an automatic fallback.
 - Logout attempts remote revocation and removes local authorization according to

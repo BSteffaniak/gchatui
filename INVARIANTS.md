@@ -44,9 +44,13 @@ These are acceptance criteria for every valid change.
 - **Secrets have explicit custody.** Tokens and private key material never enter
   ordinary config, logs, diagnostics, fixtures, process arguments, environment
   variables, or release artifacts.
-- **Persistent credentials are encrypted.** Never silently fall back to plaintext.
-  Session-only authentication is the fallback when secure persistence is
-  unavailable.
+- **Persistent credentials may use an explicitly configured convenience mode.**
+  The refresh token remains encrypted in the app-specific sshenv vault. When
+  `vault_passphrase = false`, gchatui may protect the generated app-only identity
+  with current-user filesystem permissions instead of a passphrase. This mode is a
+  deliberate local-device tradeoff: copying both identity and vault permits token
+  recovery. Never select it silently; session-only mode remains the no-persistence
+  fallback.
 - **The app owns its vault.** gchatui never reads or mutates a global sshenv vault.
 
 ## Dependencies

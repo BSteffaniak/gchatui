@@ -66,6 +66,18 @@ impl SshenvCredentialStore {
         Ok(store)
     }
 
+    pub fn bootstrap_unencrypted(
+        vault_path: impl Into<PathBuf>,
+        identity_path: impl Into<PathBuf>,
+    ) -> Result<Self, CredentialError> {
+        let store = Self::new(vault_path, identity_path);
+        if !store.identity_path.exists() {
+            let identity = generate_unencrypted_identity(&store.identity_path)?;
+            store.initialize(&identity.public_key)?;
+        }
+        Ok(store)
+    }
+
     pub fn reset(self) -> Result<(), CredentialError> {
         remove_if_present(&self.vault_path)?;
         remove_if_present(&self.identity_path)?;
@@ -249,31 +261,52 @@ pub struct GeneratedIdentity {
     pub private_key_path: PathBuf,
 }
 
+pub fn generate_unencrypted_identity(
+    identity_path: &Path,
+) -> Result<GeneratedIdentity, CredentialError> {
+    prepare_identity_parent(identity_path)?;
+    let private = PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519)
+        .map_err(CredentialError::Identity)?;
+    write_identity(identity_path, &private)
+}
+
 pub fn generate_encrypted_identity(
     identity_path: &Path,
     passphrase: &Secret,
 ) -> Result<GeneratedIdentity, CredentialError> {
+    prepare_identity_parent(identity_path)?;
+
+    let private = PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519)
+        .map_err(CredentialError::Identity)?;
+    let encrypted = private
+        .encrypt(&mut ssh_key::rand_core::OsRng, passphrase.as_bytes())
+        .map_err(CredentialError::Identity)?;
+    write_identity(identity_path, &encrypted)
+}
+
+fn prepare_identity_parent(identity_path: &Path) -> Result<(), CredentialError> {
     let parent = identity_path.parent().ok_or_else(|| {
         CredentialError::Write(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "identity path has no parent",
         ))
     })?;
-    fs::create_dir_all(parent).map_err(CredentialError::Write)?;
+    fs::create_dir_all(parent).map_err(CredentialError::Write)
+}
 
-    let private = PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519)
-        .map_err(CredentialError::Identity)?;
+fn write_identity(
+    identity_path: &Path,
+    private: &PrivateKey,
+) -> Result<GeneratedIdentity, CredentialError> {
     let public_key = private
         .public_key()
         .to_openssh()
         .map_err(CredentialError::Identity)?;
-    let encrypted = private
-        .encrypt(&mut ssh_key::rand_core::OsRng, passphrase.as_bytes())
-        .map_err(CredentialError::Identity)?
+    let encoded = private
         .to_openssh(LineEnding::LF)
         .map_err(CredentialError::Identity)?;
 
-    write_private_file(identity_path, encrypted.as_bytes())?;
+    write_private_file(identity_path, encoded.as_bytes())?;
     fs::write(
         identity_path.with_extension("pub"),
         format!("{public_key}\n"),
@@ -331,6 +364,35 @@ mod tests {
     use super::*;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn unencrypted_identity_enables_prompt_free_persistent_lifecycle() {
+        let directory = tempdir().unwrap();
+        let (vault, identity) = auth_state_paths(directory.path());
+        let store = SshenvCredentialStore::bootstrap_unencrypted(&vault, &identity).unwrap();
+        let private = PrivateKey::read_openssh_file(&identity).unwrap();
+        assert!(!private.is_encrypted());
+        store
+            .save_refresh_token(Zeroizing::new("synthetic-convenience-token".to_string()))
+            .unwrap();
+        let reopened = SshenvCredentialStore::new(&vault, &identity);
+        assert_eq!(
+            reopened
+                .load_refresh_token()
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("synthetic-convenience-token")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&identity).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[test]
     fn persistent_store_uses_app_supplied_passphrase_for_full_lifecycle() {

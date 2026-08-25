@@ -12,13 +12,20 @@ struct ConfigFile {
     oauth_client_path: Option<PathBuf>,
     #[serde(default)]
     session_only: bool,
+    #[serde(default = "default_vault_passphrase")]
+    vault_passphrase: bool,
     #[serde(default)]
     keybindings: KeybindingOverrides,
+}
+
+const fn default_vault_passphrase() -> bool {
+    true
 }
 
 pub struct AppConfig {
     pub oauth_client_path: Option<PathBuf>,
     pub session_only: bool,
+    pub vault_passphrase: bool,
     pub keybindings: KeybindingRegistry,
 }
 
@@ -43,6 +50,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
         return Ok(AppConfig {
             oauth_client_path: None,
             session_only: false,
+            vault_passphrase: true,
             keybindings: KeybindingRegistry::default(),
         });
     };
@@ -50,6 +58,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
         return Ok(AppConfig {
             oauth_client_path: None,
             session_only: false,
+            vault_passphrase: true,
             keybindings: KeybindingRegistry::default(),
         });
     }
@@ -64,6 +73,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     Ok(AppConfig {
         oauth_client_path: config.oauth_client_path,
         session_only: config.session_only,
+        vault_passphrase: config.vault_passphrase,
         keybindings: KeybindingRegistry::with_overrides(&config.keybindings)?,
     })
 }
@@ -110,6 +120,8 @@ mod tests {
         fs::write(
             &path,
             r#"
+            vault_passphrase = false
+
             [keybindings]
             unbind = ["help"]
 
@@ -118,7 +130,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        let registry = load_keybindings(Some(&path)).unwrap();
+        let config = load(Some(&path)).unwrap();
+        assert!(!config.vault_passphrase);
+        let registry = config.keybindings;
         assert_eq!(registry.labels_for(Action::Refresh), ["Ctrl+r"]);
         assert!(registry.labels_for(Action::Help).is_empty());
     }
