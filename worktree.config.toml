@@ -1,0 +1,11 @@
+description = "gchatui development environment"
+
+clean = [
+    "/target",
+    "/dist",
+    "/.codeql",
+    "/local-state",
+    "/diagnostics",
+    "/recordings",
+    "/screenshots",
+]

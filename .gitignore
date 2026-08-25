@@ -1,0 +1,26 @@
+/target/
+/dist/
+/.direnv/
+/.codeql/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.db
+*.bak
+
+# Credentials and private local state
+*credentials*.json
+*client_secret*.json
+*oauth*.json
+*.vault
+*.key
+*.pem
+identity
+identity.pub
+/local-state/
+/diagnostics/
+/recordings/
+/screenshots/
+/.private-denylist

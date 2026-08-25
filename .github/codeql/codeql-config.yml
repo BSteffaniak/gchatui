@@ -1,0 +1,4 @@
+name: gchatui CodeQL configuration
+paths-ignore:
+  - target
+  - dist

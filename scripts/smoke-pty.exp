@@ -1,0 +1,32 @@
+#!/usr/bin/env expect
+set timeout 20
+set binary [lindex $argv 0]
+if {$binary eq ""} {
+    set binary "target/debug/gchatui"
+}
+
+spawn -noecho $binary
+set child $spawn_id
+after 300
+
+# Resize the PTY, exercise keyboard navigation/help, pointer selection, wheel
+# scrolling, and pointer Help activation, then quit through the configured default
+# action. SGR mouse coordinates are 1-based.
+stty rows 30 columns 100
+send -- "\t"
+send -- "\033\[<0;3;4M\033\[<0;3;4m"
+send -- "\033\[<65;3;5M"
+send -- "\033\[<0;27;1M\033\[<0;27;1m"
+send -- "?"
+send -- "q"
+expect eof
+
+set wait_result [wait]
+set exit_code [lindex $wait_result 3]
+if {$exit_code != 0} {
+    puts stderr "gchatui exited with status $exit_code"
+    exit $exit_code
+}
+
+stty sane
+puts "pty-smoke: PASS"

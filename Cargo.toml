@@ -1,0 +1,66 @@
+[package]
+categories  = ["command-line-utilities"]
+description = "A mouse- and keyboard-friendly Google Chat terminal client"
+edition     = "2024"
+keywords    = ["chat", "google-chat", "terminal", "tui"]
+license     = "MPL-2.0"
+name        = "gchatui"
+publish     = false
+readme      = "README.md"
+repository  = "https://github.com/BSteffaniak/gchatui"
+version     = "0.1.0-alpha.1"
+
+[dependencies]
+age = { version = "0.12", features = ["ssh"] }
+anyhow = "1.0"
+base64 = "0.22"
+bmux_keyboard = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master" }
+bmux_tui = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
+    "crossterm",
+] }
+bmux_tui_components = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
+    "button",
+    "key-hint-bar",
+    "pane",
+    "scroll-area",
+    "selectable-list",
+    "status-bar",
+    "text-view",
+] }
+bmux_tui_runtime = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
+    "crossterm",
+] }
+dirs = "6.0"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = [
+    "form",
+    "json",
+    "rustls",
+] }
+rpassword = "7.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+ssh-key = { version = "0.6", features = ["ed25519", "encryption", "getrandom"] }
+sshenv_vault = { git = "https://github.com/BSteffaniak/sshenv.git", branch = "master" }
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["macros", "rt"] }
+toml = "1.0"
+webbrowser = "1.0"
+zeroize = "1.0"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[lints.clippy]
+all                     = { level = "warn", priority = -1 }
+cargo                   = { level = "warn", priority = -1 }
+cargo_common_metadata   = "allow"
+missing_errors_doc      = "allow"
+missing_panics_doc      = "allow"
+multiple_crate_versions = "allow"
+nursery                 = { level = "warn", priority = -1 }
+pedantic                = { level = "warn", priority = -1 }
+
+[lints.rust]
+unsafe_code = "forbid"

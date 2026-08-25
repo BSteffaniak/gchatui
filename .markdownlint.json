@@ -1,0 +1,16 @@
+{
+  "default": true,
+  "MD003": false,
+  "MD013": false,
+  "MD033": {
+    "allowed_elements": ["br", "details", "summary"]
+  },
+  "MD040": false,
+  "MD041": false,
+  "MD025": {
+    "front_matter_title": ""
+  },
+  "MD029": {
+    "style": "ordered"
+  }
+}
