@@ -20,6 +20,7 @@ use crate::credential::Secret;
 pub const CHAT_SPACES_READONLY: &str = "https://www.googleapis.com/auth/chat.spaces.readonly";
 pub const CHAT_MESSAGES_READONLY: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const LEGACY_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const REVOCATION_ENDPOINT: &str = "https://oauth2.googleapis.com/revoke";
 #[cfg(test)]
@@ -329,7 +330,7 @@ pub fn load_desktop_client(path: &Path) -> Result<InstalledClient, OAuthError> {
     })?;
     let client: ClientFile =
         serde_json::from_str(&contents).map_err(|_| OAuthError::InvalidClient)?;
-    validate_endpoint(&client.installed.auth_uri, AUTH_ENDPOINT)?;
+    validate_auth_endpoint(&client.installed.auth_uri)?;
     validate_endpoint(&client.installed.token_uri, TOKEN_ENDPOINT)?;
     if client.installed.client_id.is_empty() || client.installed.client_secret.is_empty() {
         return Err(OAuthError::InvalidClient);
@@ -378,6 +379,14 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer).map(|value| value.map(Zeroizing::new))
+}
+
+fn validate_auth_endpoint(actual: &str) -> Result<(), OAuthError> {
+    if matches!(actual, AUTH_ENDPOINT | LEGACY_AUTH_ENDPOINT) {
+        Ok(())
+    } else {
+        Err(OAuthError::InvalidEndpoint(actual.to_string()))
+    }
 }
 
 fn validate_endpoint(actual: &str, expected: &str) -> Result<(), OAuthError> {
@@ -488,6 +497,13 @@ mod tests {
             callback.wait(Duration::from_secs(2), cancel_rx).await,
             Err(OAuthError::CallbackCancelled)
         ));
+    }
+
+    #[test]
+    fn google_legacy_authorization_endpoint_is_accepted() {
+        assert!(validate_auth_endpoint(LEGACY_AUTH_ENDPOINT).is_ok());
+        assert!(validate_auth_endpoint(AUTH_ENDPOINT).is_ok());
+        assert!(validate_auth_endpoint("https://example.com/auth").is_err());
     }
 
     #[test]
