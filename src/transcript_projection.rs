@@ -164,26 +164,27 @@ fn append_message(
         .as_ref()
         .map_or_else(|| "Unknown sender".to_string(), sender_label);
     let indent = if reply { "    │ " } else { "" };
+    let background = Style::new().bg(colors.message_background);
     lines.push(Line::from_spans([
         Span::styled(
             format!("{indent}{sender}"),
-            Style::new().fg(colors.accent).add_modifier(Modifier::BOLD),
+            background.fg(colors.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  {}", message.create_time),
-            Style::new().fg(colors.muted),
+            background.fg(colors.muted),
         ),
     ]));
     for physical_line in normalized_message_lines(&message.text) {
         lines.push(Line::from_spans([Span::styled(
             format!("{indent}{physical_line}"),
-            Style::new().fg(colors.text),
+            background.fg(colors.text),
         )]));
     }
     if message.unsupported_content {
         lines.push(Line::from_spans([Span::styled(
             format!("{indent}◇ Rich content is not available in the terminal"),
-            Style::new().fg(colors.warning),
+            background.fg(colors.warning),
         )]));
     }
     lines.push(Line::from(""));
@@ -242,6 +243,7 @@ pub struct TranscriptColors {
     pub accent: Color,
     pub warning: Color,
     pub border: Color,
+    pub message_background: Color,
 }
 
 #[cfg(test)]
@@ -272,7 +274,31 @@ mod tests {
             accent: Color::Cyan,
             warning: Color::Yellow,
             border: Color::BrightBlack,
+            message_background: Color::Black,
         }
+    }
+
+    #[test]
+    fn message_rows_use_the_message_background_but_spacing_does_not() {
+        let projection = project(
+            &[message("body", "09:00", None, false)],
+            |sender| sender.display_name.clone().unwrap(),
+            colors(),
+        );
+
+        assert!(
+            projection.lines[0]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(Color::Black))
+        );
+        assert!(
+            projection.lines[1]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(Color::Black))
+        );
+        assert!(projection.lines[2].spans[0].style.bg.is_none());
     }
 
     #[test]

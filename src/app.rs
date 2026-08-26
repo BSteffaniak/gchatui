@@ -43,6 +43,7 @@ use crate::transcript_projection::{ThreadActivityLink, TranscriptColors, Transcr
 
 const CANVAS: Color = Color::Rgb(10, 14, 24);
 const SURFACE: Color = Color::Rgb(16, 23, 38);
+const MESSAGE_BG: Color = Color::Rgb(24, 35, 54);
 const SURFACE_RAISED: Color = Color::Rgb(24, 34, 53);
 const BORDER: Color = Color::Rgb(52, 67, 91);
 const TEXT: Color = Color::Rgb(226, 232, 240);
@@ -932,6 +933,7 @@ fn project_conversation(product: &ProductState) -> TranscriptProjection {
             accent: ACCENT_STRONG,
             warning: WARNING,
             border: BORDER,
+            message_background: MESSAGE_BG,
         },
     )
 }
@@ -1082,6 +1084,12 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         app.follow_conversation_bottom = false;
     }
     conversation_view.render(conversation_area, &app.conversation_view, frame);
+    extend_message_backgrounds(
+        frame,
+        conversation_area,
+        &conversation_view,
+        &app.conversation_view,
+    );
     render_thread_activity_hits(app, &conversation_view, conversation_area, frame);
 
     let footer_y = area
@@ -1128,6 +1136,44 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
             frame,
         );
     enforce_opaque_viewport(frame, area);
+}
+
+fn extend_message_backgrounds(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &TextView<'_>,
+    state: &TextViewState,
+) {
+    let layout = view.layout(area, state);
+    for (visible_row, line) in layout
+        .lines
+        .iter()
+        .skip(layout.vertical_scroll)
+        .take(usize::from(area.height))
+        .enumerate()
+    {
+        if !line
+            .spans
+            .iter()
+            .any(|span| span.style.bg == Some(MESSAGE_BG))
+        {
+            continue;
+        }
+        let Some(y) = u16::try_from(visible_row)
+            .ok()
+            .and_then(|row| area.y.checked_add(row))
+        else {
+            continue;
+        };
+        let start_x = area
+            .x
+            .saturating_add(u16::try_from(line.width()).unwrap_or(area.width));
+        for x in start_x.min(area.right())..area.right() {
+            if let Some(cell) = frame.buffer_mut().get_mut(Point::new(x, y)) {
+                cell.style.bg = Some(MESSAGE_BG);
+            }
+        }
+    }
 }
 
 fn enforce_opaque_viewport(frame: &mut Frame<'_>, area: Rect) {
@@ -1808,6 +1854,28 @@ mod tests {
             .join("\n");
         assert!(rendered.contains("1 REPLY"));
         assert!(!rendered.contains("private-id"));
+    }
+
+    #[test]
+    fn message_background_extends_across_the_conversation_width() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.messages = vec![crate::model::Message {
+            id: crate::model::MessageId("messages/example".to_string()),
+            thread_id: None,
+            sender: None,
+            text: "Synthetic message".to_string(),
+            create_time: "10:42".to_string(),
+            is_thread_reply: false,
+            unsupported_content: false,
+        }];
+        app.rebuild_projections();
+
+        let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 26));
+        let area = conversation_content_area(app.conversation_pane.area);
+        let rightmost = buffer
+            .get(Point::new(area.right().saturating_sub(1), area.y))
+            .expect("message row should be inside the rendered buffer");
+        assert_eq!(rightmost.style.bg, Some(MESSAGE_BG));
     }
 
     #[test]
