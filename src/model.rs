@@ -46,6 +46,7 @@ pub struct Message {
     pub sender: Option<Sender>,
     pub text: String,
     pub create_time: String,
+    pub is_thread_reply: bool,
     pub unsupported_content: bool,
 }
 

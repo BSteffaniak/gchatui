@@ -200,6 +200,7 @@ mod tests {
             sender: None,
             text: "Synthetic message".to_string(),
             create_time: time.to_string(),
+            is_thread_reply: false,
             unsupported_content: false,
         }
     }

@@ -8,7 +8,7 @@ use bmux_tui::crossterm::{CrosstermTerminalGuard, terminal_size};
 use bmux_tui::event::{Event, MouseButton, MouseEventKind};
 use bmux_tui::frame::Frame;
 use bmux_tui::geometry::{Insets, Point, Rect};
-use bmux_tui::hit::HitMap;
+use bmux_tui::hit::{HitId, HitMap, HitRegion, HitRole};
 use bmux_tui::interaction::InteractionRouter;
 use bmux_tui::prelude::{Color, Line, Modifier, Span, Style};
 use bmux_tui::terminal::Terminal;
@@ -39,6 +39,7 @@ use crate::keybind::{Action, KeybindingRegistry};
 use crate::people::PeopleClient;
 use crate::product::{Effect, Phase, ProductMessage, ProductState};
 use crate::sender_alias::SenderAliases;
+use crate::transcript_projection::{ThreadActivityLink, TranscriptColors, TranscriptProjection};
 
 const CANVAS: Color = Color::Rgb(10, 14, 24);
 const SURFACE: Color = Color::Rgb(16, 23, 38);
@@ -70,6 +71,8 @@ pub struct App {
     spaces: SelectableListState,
     space_items: Arc<Vec<SelectableListItem>>,
     conversation_lines: Arc<Vec<Line>>,
+    thread_activity_links: Arc<Vec<ThreadActivityLink>>,
+    focused_thread_activity: Option<usize>,
     product: ProductState,
     chat: Arc<ChatClient>,
     people: Arc<PeopleClient>,
@@ -117,6 +120,8 @@ impl App {
             spaces: SelectableListState::new(Some(0)),
             space_items: Arc::new(Vec::new()),
             conversation_lines: Arc::new(vec![Line::from("Select a space to read messages")]),
+            thread_activity_links: Arc::new(Vec::new()),
+            focused_thread_activity: None,
             product: ProductState::default(),
             chat: Arc::new(ChatClient::new()),
             people: Arc::new(PeopleClient::new()),
@@ -136,7 +141,10 @@ impl App {
 
     fn rebuild_projections(&mut self) {
         self.space_items = Arc::new(project_spaces(&self.product));
-        self.conversation_lines = Arc::new(project_conversation(&self.product));
+        let projection = project_conversation(&self.product);
+        self.conversation_lines = Arc::new(projection.lines);
+        self.thread_activity_links = Arc::new(projection.links);
+        self.focused_thread_activity = None;
     }
 
     const fn focus_spaces_pane(&mut self) {
@@ -328,6 +336,32 @@ impl App {
         Update::reset()
     }
 
+    fn handle_thread_activity_event(&mut self, event: &Event) -> Option<Update<AppMessage>> {
+        let route = self.interactions.route(event.clone());
+        let target = route.target.as_ref()?.as_str();
+        let index = self
+            .thread_activity_links
+            .iter()
+            .position(|link| link.id == target)?;
+        let activated = matches!(
+            event,
+            Event::Mouse(bmux_tui::event::MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..
+            })
+        ) || event
+            .key()
+            .and_then(|stroke| self.bindings.action_for(stroke))
+            == Some(Action::Activate);
+        self.focused_thread_activity = Some(index);
+        if activated {
+            self.conversation_view
+                .set_vertical_scroll(self.thread_activity_links[index].target_line);
+            self.follow_conversation_bottom = false;
+        }
+        Some(Update::redraw())
+    }
+
     fn handle_direct_wheel(&mut self, event: &Event) -> Option<Update<AppMessage>> {
         let Event::Mouse(mouse) = event else {
             return None;
@@ -451,6 +485,9 @@ impl App {
             return self.apply_action(action);
         }
 
+        if let Some(update) = self.handle_thread_activity_event(&event) {
+            return update;
+        }
         if let Some(update) = self.handle_direct_wheel(&event) {
             return update;
         }
@@ -868,72 +905,30 @@ fn project_spaces(product: &ProductState) -> Vec<SelectableListItem> {
         .collect()
 }
 
-fn project_conversation(product: &ProductState) -> Vec<Line> {
+fn project_conversation(product: &ProductState) -> TranscriptProjection {
     if product.messages.is_empty() {
-        return vec![Line::from(match product.phase {
-            Phase::LoadingMessages | Phase::Refreshing => "Loading messages…",
-            Phase::Empty => "No messages",
-            Phase::RecoverableError => "Unable to load messages. Refresh to retry.",
-            Phase::Reauthentication => "Authorization expired. Sign in again.",
-            _ => "Select a space to read messages",
-        })];
+        return TranscriptProjection {
+            lines: vec![Line::from(match product.phase {
+                Phase::LoadingMessages | Phase::Refreshing => "Loading messages…",
+                Phase::Empty => "No messages",
+                Phase::RecoverableError => "Unable to load messages. Refresh to retry.",
+                Phase::Reauthentication => "Authorization expired. Sign in again.",
+                _ => "Select a space to read messages",
+            })],
+            links: Vec::new(),
+        };
     }
-    let mut lines = Vec::new();
-    let mut index = 0;
-    while index < product.messages.len() {
-        let message = &product.messages[index];
-        let thread = message.thread_id.as_ref().map(|thread| thread.0.as_str());
-        let run_length = thread.map_or(1, |thread_id| {
-            product.messages[index..]
-                .iter()
-                .take_while(|candidate| {
-                    candidate.thread_id.as_ref().map(|value| value.0.as_str()) == Some(thread_id)
-                })
-                .count()
-        });
-        let grouped = thread.is_some() && run_length >= 2;
-        if grouped {
-            lines.push(Line::from_spans(vec![
-                Span::styled("┌─ ", Style::new().fg(BORDER)),
-                Span::styled(
-                    format!("{run_length} MESSAGES IN THREAD"),
-                    Style::new().fg(MUTED).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" ─", Style::new().fg(BORDER)),
-            ]));
-        }
-        for message in &product.messages[index..index.saturating_add(run_length)] {
-            append_message_lines(&mut lines, message, grouped);
-        }
-        index = index.saturating_add(run_length);
-    }
-    lines
-}
-
-fn append_message_lines(lines: &mut Vec<Line>, message: &crate::model::Message, grouped: bool) {
-    let sender = message
-        .sender
-        .as_ref()
-        .map_or_else(|| "Unknown sender".to_string(), sender_label);
-    let indent = if grouped { "  " } else { "" };
-    lines.push(Line::from_spans(vec![
-        Span::styled(
-            format!("{indent}{sender}"),
-            Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!("  {}", message.create_time), Style::new().fg(MUTED)),
-    ]));
-    lines.push(Line::from_spans(vec![Span::styled(
-        format!("{indent}{}", message.text),
-        Style::new().fg(TEXT),
-    )]));
-    if message.unsupported_content {
-        lines.push(Line::from_spans(vec![Span::styled(
-            format!("{indent}◇ Rich content is not available in the terminal"),
-            Style::new().fg(WARNING),
-        )]));
-    }
-    lines.push(Line::from(""));
+    crate::transcript_projection::project(
+        &product.messages,
+        sender_label,
+        TranscriptColors {
+            text: TEXT,
+            muted: MUTED,
+            accent: ACCENT_STRONG,
+            warning: WARNING,
+            border: BORDER,
+        },
+    )
 }
 
 fn sender_label(sender: &crate::model::Sender) -> String {
@@ -952,6 +947,32 @@ fn sender_label(sender: &crate::model::Sender) -> String {
             .strip_prefix("users/")
             .filter(|id| !id.is_empty())
             .map_or_else(|| "Unknown sender".to_string(), |id| format!("User {id}")),
+    }
+}
+
+fn thread_activity_area(
+    link: &ThreadActivityLink,
+    view: &TextView<'_>,
+    state: &TextViewState,
+    area: Rect,
+) -> Option<Rect> {
+    let layout = view.layout(area, state);
+    let relative = link.source_line.checked_sub(layout.vertical_scroll)?;
+    let row = u16::try_from(relative).ok()?;
+    (row < area.height).then_some(Rect::new(area.x, area.y.saturating_add(row), area.width, 1))
+}
+
+fn render_thread_activity_hits(app: &App, view: &TextView<'_>, area: Rect, frame: &mut Frame<'_>) {
+    for link in app.thread_activity_links.iter() {
+        let Some(hit_area) = thread_activity_area(link, view, &app.conversation_view, area) else {
+            continue;
+        };
+        frame.push_hit(
+            HitRegion::new(HitId::new(link.id.clone()), hit_area)
+                .role(HitRole::Action)
+                .hoverable(true)
+                .focusable(true),
+        );
     }
 }
 
@@ -1040,6 +1061,7 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         app.follow_conversation_bottom = false;
     }
     conversation_view.render(conversation_area, &app.conversation_view, frame);
+    render_thread_activity_hits(app, &conversation_view, conversation_area, frame);
 
     let footer_y = area
         .y
@@ -1551,6 +1573,7 @@ mod tests {
             }),
             text: "Synthetic message".to_string(),
             create_time: "10:42".to_string(),
+            is_thread_reply: false,
             unsupported_content: false,
         }];
         let _ = app.open_alias_editor();
@@ -1622,6 +1645,7 @@ mod tests {
                 sender: None,
                 text: format!("Synthetic message {index}"),
                 create_time: format!("{index:03}"),
+                is_thread_reply: false,
                 unsupported_content: false,
             });
         }
@@ -1660,6 +1684,7 @@ mod tests {
                 sender: None,
                 text: format!("Synthetic reply {index}"),
                 create_time: format!("10:4{index}"),
+                is_thread_reply: index > 0,
                 unsupported_content: false,
             })
             .collect();
@@ -1670,7 +1695,7 @@ mod tests {
             .map(Line::plain_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("2 MESSAGES IN THREAD"));
+        assert!(rendered.contains("1 REPLY"));
         assert!(!rendered.contains("private-id"));
     }
 
@@ -1687,6 +1712,7 @@ mod tests {
             }),
             text: "Synthetic reply".to_string(),
             create_time: "10:42".to_string(),
+            is_thread_reply: false,
             unsupported_content: false,
         }];
         app.rebuild_projections();

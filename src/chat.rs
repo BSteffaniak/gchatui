@@ -422,6 +422,8 @@ struct MessageDto {
     thread: Option<ThreadDto>,
     sender: Option<UserDto>,
     #[serde(default)]
+    thread_reply: bool,
+    #[serde(default)]
     cards_v2: Vec<serde_json::Value>,
     #[serde(default)]
     attachment: Vec<serde_json::Value>,
@@ -453,6 +455,7 @@ impl From<MessageDto> for Message {
             sender: value.sender.map(Into::into),
             text: value.text,
             create_time: value.create_time,
+            is_thread_reply: value.thread_reply,
             unsupported_content: !value.cards_v2.is_empty() || !value.attachment.is_empty(),
         }
     }

@@ -12,6 +12,7 @@ pub mod oauth;
 pub mod people;
 pub mod product;
 pub mod sender_alias;
+pub mod transcript_projection;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {

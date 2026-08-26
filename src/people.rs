@@ -559,6 +559,7 @@ mod tests {
             }),
             text: "Synthetic message".to_string(),
             create_time: "2026-01-01T00:00:00Z".to_string(),
+            is_thread_reply: false,
             unsupported_content: false,
         }];
         PeopleClient::with_directory_base_url(Url::parse(&format!("http://{address}/")).unwrap())
@@ -596,6 +597,7 @@ mod tests {
             }),
             text: "Synthetic message".to_string(),
             create_time: "2026-01-01T00:00:00Z".to_string(),
+            is_thread_reply: false,
             unsupported_content: false,
         }];
         PeopleClient::with_base_url(Url::parse(&format!("http://{address}/")).unwrap())
@@ -638,6 +640,7 @@ mod tests {
             }),
             text: "Synthetic message".to_string(),
             create_time: "2026-01-01T00:00:00Z".to_string(),
+            is_thread_reply: false,
             unsupported_content: false,
         }];
         PeopleClient::with_base_url(Url::parse(&format!("http://{address}/")).unwrap())
