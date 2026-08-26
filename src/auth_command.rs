@@ -72,7 +72,7 @@ pub async fn logout(manager: &AuthManager) -> Result<LogoutOutcome, AuthCommandE
     manager.logout().await.map_err(Into::into)
 }
 
-pub fn reset(store: &dyn CredentialStore) -> Result<bool, AuthCommandError> {
+pub fn reset_authorization(store: &dyn CredentialStore) -> Result<bool, AuthCommandError> {
     store.delete_refresh_token().map_err(Into::into)
 }
 
@@ -112,7 +112,7 @@ mod tests {
         store
             .save_refresh_token(Zeroizing::new("test-refresh".to_string()))
             .unwrap();
-        assert!(reset(&store).unwrap());
+        assert!(reset_authorization(&store).unwrap());
         assert!(store.load_refresh_token().unwrap().is_none());
     }
 

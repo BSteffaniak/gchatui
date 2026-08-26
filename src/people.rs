@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use reqwest::{StatusCode, Url};
 use serde::Deserialize;
@@ -25,6 +26,8 @@ pub enum PeopleError {
 pub struct PeopleClient {
     http: reqwest::Client,
     base_url: Url,
+    directory: tokio::sync::Mutex<Option<Arc<BTreeMap<String, String>>>>,
+    contacts_enabled: bool,
 }
 
 impl PeopleClient {
@@ -37,6 +40,8 @@ impl PeopleClient {
                 .build()
                 .expect("static HTTP configuration should be valid"),
             base_url: Url::parse(PEOPLE_API).expect("static People API URL should be valid"),
+            directory: tokio::sync::Mutex::new(None),
+            contacts_enabled: true,
         }
     }
 
@@ -45,6 +50,18 @@ impl PeopleClient {
         Self {
             http: reqwest::Client::new(),
             base_url,
+            directory: tokio::sync::Mutex::new(Some(Arc::new(BTreeMap::new()))),
+            contacts_enabled: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_directory_base_url(base_url: Url) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base_url,
+            directory: tokio::sync::Mutex::new(None),
+            contacts_enabled: false,
         }
     }
 
@@ -56,15 +73,68 @@ impl PeopleClient {
         let resource_names = messages
             .iter()
             .filter_map(|message| message.sender.as_ref())
-            .filter(|sender| sender.display_name.is_none() && sender.kind == SenderKind::Human)
+            .filter(|sender| {
+                sender.display_name.is_none()
+                    && matches!(sender.kind, SenderKind::Human | SenderKind::Unknown)
+            })
             .filter_map(|sender| chat_user_to_person(&sender.resource_name))
             .collect::<BTreeSet<_>>();
+        if sender_diagnostics_enabled() {
+            let total_senders = messages
+                .iter()
+                .filter(|message| message.sender.is_some())
+                .count();
+            let missing_names = messages
+                .iter()
+                .filter_map(|message| message.sender.as_ref())
+                .filter(|sender| sender.display_name.is_none())
+                .count();
+            eprintln!(
+                "gchatui sender diagnostics: messages={} senders={} missing_names={} eligible={}",
+                messages.len(),
+                total_senders,
+                missing_names,
+                resource_names.len()
+            );
+        }
         if resource_names.is_empty() {
             return Ok(());
         }
 
+        let requested = resource_names.iter().cloned().collect::<Vec<_>>();
+        let mut identity_index = match self.directory_index(access_token).await {
+            Ok(directory) => (*directory).clone(),
+            Err(PeopleError::Unauthorized | PeopleError::Forbidden | PeopleError::Transport) => {
+                BTreeMap::new()
+            }
+            Err(PeopleError::Malformed) => return Err(PeopleError::Malformed),
+        };
+        if self.contacts_enabled {
+            match self.contacts_index(access_token).await {
+                Ok(contacts) => identity_index.extend(contacts),
+                Err(
+                    PeopleError::Unauthorized | PeopleError::Forbidden | PeopleError::Transport,
+                ) => {}
+                Err(PeopleError::Malformed) => return Err(PeopleError::Malformed),
+            }
+        }
+        let directory = Arc::new(identity_index);
+        let mut unresolved = BTreeSet::new();
+        for message in messages.iter_mut() {
+            if let Some(sender) = message.sender.as_mut()
+                && sender.display_name.is_none()
+                && let Some(person_name) = chat_user_to_person(&sender.resource_name)
+            {
+                if let Some(display_name) = directory.get(&person_name) {
+                    sender.display_name = Some(display_name.clone());
+                } else {
+                    unresolved.insert(person_name);
+                }
+            }
+        }
+
         let mut resolved = BTreeMap::new();
-        for batch in resource_names
+        for batch in unresolved
             .into_iter()
             .collect::<Vec<_>>()
             .chunks(MAX_BATCH_SIZE)
@@ -80,7 +150,131 @@ impl PeopleClient {
                 sender.display_name = Some(display_name.clone());
             }
         }
+        if sender_diagnostics_enabled() {
+            let resolved_count = requested
+                .iter()
+                .filter(|name| directory.contains_key(*name) || resolved.contains_key(*name))
+                .count();
+            eprintln!(
+                "gchatui sender diagnostics: directory_entries={} resolved={resolved_count}",
+                directory.len()
+            );
+        }
         Ok(())
+    }
+
+    async fn contacts_index(
+        &self,
+        access_token: &Zeroizing<String>,
+    ) -> Result<BTreeMap<String, String>, PeopleError> {
+        let mut index = BTreeMap::new();
+        let mut page_token = None;
+        loop {
+            let mut url = Url::parse(&format!("{}people/me/connections", self.base_url.as_str()))
+                .map_err(|_| PeopleError::Malformed)?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("personFields", "names,metadata");
+                query.append_pair("pageSize", "1000");
+                if let Some(token) = page_token.as_deref() {
+                    query.append_pair("pageToken", token);
+                }
+            }
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(access_token.as_str())
+                .send()
+                .await
+                .map_err(|_| PeopleError::Transport)?;
+            match response.status() {
+                status if status.is_success() => {}
+                StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
+                StatusCode::FORBIDDEN => return Err(PeopleError::Forbidden),
+                _ => return Err(PeopleError::Transport),
+            }
+            let payload: ConnectionsResponse =
+                response.json().await.map_err(|_| PeopleError::Malformed)?;
+            for person in payload.connections {
+                if let Some(display_name) = primary_display_name(&person.names) {
+                    index_person(&mut index, &person, &display_name);
+                }
+            }
+            page_token = payload.next_page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(index)
+    }
+
+    async fn directory_index(
+        &self,
+        access_token: &Zeroizing<String>,
+    ) -> Result<Arc<BTreeMap<String, String>>, PeopleError> {
+        let mut cache = self.directory.lock().await;
+        if let Some(index) = cache.as_ref() {
+            return Ok(Arc::clone(index));
+        }
+        let mut index = BTreeMap::new();
+        let mut page_token = None;
+        loop {
+            let mut url = Url::parse(&format!(
+                "{}people:listDirectoryPeople",
+                self.base_url.as_str()
+            ))
+            .map_err(|_| PeopleError::Malformed)?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("readMask", "names,metadata");
+                query.append_pair("sources", "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE");
+                query.append_pair("sources", "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT");
+                query.append_pair("pageSize", "1000");
+                if let Some(token) = page_token.as_deref() {
+                    query.append_pair("pageToken", token);
+                }
+            }
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(access_token.as_str())
+                .send()
+                .await
+                .map_err(|_| PeopleError::Transport)?;
+            if sender_diagnostics_enabled() {
+                eprintln!(
+                    "gchatui sender diagnostics: directory status={} indexed_so_far={}",
+                    response.status(),
+                    index.len()
+                );
+            }
+            match response.status() {
+                status if status.is_success() => {}
+                StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
+                StatusCode::FORBIDDEN => {
+                    if sender_diagnostics_enabled() {
+                        report_google_error(response).await;
+                    }
+                    return Err(PeopleError::Forbidden);
+                }
+                _ => return Err(PeopleError::Transport),
+            }
+            let payload: DirectoryResponse =
+                response.json().await.map_err(|_| PeopleError::Malformed)?;
+            for person in payload.people {
+                if let Some(display_name) = primary_display_name(&person.names) {
+                    index_person(&mut index, &person, &display_name);
+                }
+            }
+            page_token = payload.next_page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+        let index = Arc::new(index);
+        *cache = Some(Arc::clone(&index));
+        drop(cache);
+        Ok(index)
     }
 
     async fn resolve_batch(
@@ -93,7 +287,6 @@ impl PeopleClient {
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("personFields", "names");
-            query.append_pair("sources", "READ_SOURCE_TYPE_DIRECTORY");
             for resource_name in resource_names {
                 query.append_pair("resourceNames", resource_name);
             }
@@ -105,6 +298,13 @@ impl PeopleClient {
             .send()
             .await
             .map_err(|_| PeopleError::Transport)?;
+        if sender_diagnostics_enabled() {
+            eprintln!(
+                "gchatui sender diagnostics: people status={} requested={}",
+                response.status(),
+                resource_names.len()
+            );
+        }
         match response.status() {
             status if status.is_success() => {}
             StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
@@ -112,11 +312,39 @@ impl PeopleClient {
             _ => return Err(PeopleError::Transport),
         }
         let payload: BatchResponse = response.json().await.map_err(|_| PeopleError::Malformed)?;
+        if sender_diagnostics_enabled() {
+            let people = payload
+                .responses
+                .iter()
+                .filter(|response| response.person.is_some())
+                .count();
+            let named = payload
+                .responses
+                .iter()
+                .filter_map(|response| response.person.as_ref())
+                .filter(|person| {
+                    person
+                        .names
+                        .iter()
+                        .any(|name| !name.display_name.is_empty())
+                })
+                .count();
+            eprintln!(
+                "gchatui sender diagnostics: people responses={} people={} named={}",
+                payload.responses.len(),
+                people,
+                named
+            );
+        }
         Ok(payload
             .responses
             .into_iter()
             .filter_map(|response| {
+                let requested_resource_name = response.requested_resource_name;
                 let person = response.person?;
+                let resolved_resource_name = requested_resource_name
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| person.resource_name.clone());
                 let mut names = person.names.into_iter();
                 let first = names.next()?;
                 let display_name = if first
@@ -134,7 +362,7 @@ impl PeopleClient {
                         })
                         .map_or(first.display_name, |name| name.display_name)
                 };
-                (!display_name.is_empty()).then_some((person.resource_name, display_name))
+                (!display_name.is_empty()).then_some((resolved_resource_name, display_name))
             })
             .collect())
     }
@@ -146,11 +374,95 @@ impl Default for PeopleClient {
     }
 }
 
+async fn report_google_error(response: reqwest::Response) {
+    #[derive(Deserialize)]
+    struct Envelope {
+        error: Option<ErrorBody>,
+    }
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        status: Option<String>,
+        #[serde(default)]
+        details: Vec<ErrorDetail>,
+    }
+    #[derive(Deserialize)]
+    struct ErrorDetail {
+        reason: Option<String>,
+    }
+    let Ok(envelope) = response.json::<Envelope>().await else {
+        eprintln!("gchatui sender diagnostics: google_error=unparseable");
+        return;
+    };
+    let status = envelope
+        .error
+        .as_ref()
+        .and_then(|error| error.status.as_deref())
+        .unwrap_or("unknown")
+        .to_string();
+    let reasons = envelope
+        .error
+        .as_ref()
+        .map(|error| {
+            error
+                .details
+                .iter()
+                .filter_map(|detail| detail.reason.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    eprintln!(
+        "gchatui sender diagnostics: google_error_status={status} reasons={}",
+        reasons.join(",")
+    );
+}
+
+fn sender_diagnostics_enabled() -> bool {
+    std::env::var_os("GCHATUI_SENDER_DIAGNOSTICS").is_some()
+}
+
 fn chat_user_to_person(resource_name: &str) -> Option<String> {
     resource_name
         .strip_prefix("users/")
         .filter(|id| !id.is_empty() && *id != "app")
         .map(|id| format!("people/{id}"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionsResponse {
+    #[serde(default)]
+    connections: Vec<PersonDto>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectoryResponse {
+    #[serde(default)]
+    people: Vec<PersonDto>,
+    next_page_token: Option<String>,
+}
+
+fn primary_display_name(names: &[NameDto]) -> Option<String> {
+    names
+        .iter()
+        .find(|name| {
+            name.metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.primary)
+        })
+        .or_else(|| names.first())
+        .map(|name| name.display_name.clone())
+        .filter(|name| !name.is_empty())
+}
+
+fn index_person(index: &mut BTreeMap<String, String>, person: &PersonDto, display_name: &str) {
+    index.insert(person.resource_name.clone(), display_name.to_string());
+    for source in &person.metadata.sources {
+        if !source.id.is_empty() {
+            index.insert(format!("people/{}", source.id), display_name.to_string());
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -161,6 +473,8 @@ struct BatchResponse {
 
 #[derive(Deserialize)]
 struct PersonResponse {
+    #[serde(rename = "requestedResourceName")]
+    requested_resource_name: Option<String>,
     person: Option<PersonDto>,
 }
 
@@ -170,6 +484,20 @@ struct PersonDto {
     resource_name: String,
     #[serde(default)]
     names: Vec<NameDto>,
+    #[serde(default)]
+    metadata: PersonMetadata,
+}
+
+#[derive(Default, Deserialize)]
+struct PersonMetadata {
+    #[serde(default)]
+    sources: Vec<PersonSource>,
+}
+
+#[derive(Deserialize)]
+struct PersonSource {
+    #[serde(default)]
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -194,6 +522,83 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    async fn resolves_directory_source_id_to_chat_user_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]).to_ascii_lowercase();
+            assert!(request.contains("people:listdirectorypeople"));
+            assert!(request.contains("directory_source_type_domain_profile"));
+            let body = r#"{"people":[{"resourceName":"people/canonical","names":[{"displayName":"Directory Person","metadata":{"primary":true}}],"metadata":{"sources":[{"type":"DOMAIN_PROFILE","id":"789"}]}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut messages = vec![Message {
+            id: MessageId("messages/example".to_string()),
+            thread_id: None,
+            sender: Some(Sender {
+                resource_name: "users/789".to_string(),
+                display_name: None,
+                kind: SenderKind::Human,
+            }),
+            text: "Synthetic message".to_string(),
+            create_time: "2026-01-01T00:00:00Z".to_string(),
+            unsupported_content: false,
+        }];
+        PeopleClient::with_directory_base_url(Url::parse(&format!("http://{address}/")).unwrap())
+            .resolve_message_senders(&Zeroizing::new("test".to_string()), &mut messages)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages[0].sender.as_ref().unwrap().display_name.as_deref(),
+            Some("Directory Person")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_sender_when_chat_omits_user_type() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"responses":[{"requestedResourceName":"people/456","person":{"resourceName":"people/456","names":[{"displayName":"Example Unknown Type"}]}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut messages = vec![Message {
+            id: MessageId("messages/example".to_string()),
+            thread_id: None,
+            sender: Some(Sender {
+                resource_name: "users/456".to_string(),
+                display_name: None,
+                kind: SenderKind::Unknown,
+            }),
+            text: "Synthetic message".to_string(),
+            create_time: "2026-01-01T00:00:00Z".to_string(),
+            unsupported_content: false,
+        }];
+        PeopleClient::with_base_url(Url::parse(&format!("http://{address}/")).unwrap())
+            .resolve_message_senders(&Zeroizing::new("test".to_string()), &mut messages)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages[0].sender.as_ref().unwrap().display_name.as_deref(),
+            Some("Example Unknown Type")
+        );
+    }
+
+    #[tokio::test]
     async fn resolves_chat_user_ids_to_people_display_names() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -205,7 +610,8 @@ mod tests {
             let request_lower = request.to_ascii_lowercase();
             assert!(request_lower.contains("resourcenames=people%2f123"));
             assert!(request_lower.contains("personfields=names"));
-            let body = r#"{"responses":[{"person":{"resourceName":"people/123","names":[{"displayName":"Example Person","metadata":{"primary":true}}]}}]}"#;
+            assert!(!request_lower.contains("read_source_type_directory"));
+            let body = r#"{"responses":[{"requestedResourceName":"people/123","person":{"resourceName":"people/canonical-profile","names":[{"displayName":"Example Person","metadata":{"primary":true}}]}}]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()

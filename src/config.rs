@@ -83,6 +83,10 @@ pub fn load_keybindings(path: Option<&Path>) -> Result<KeybindingRegistry, Confi
     load(path).map(|config| config.keybindings)
 }
 
+pub fn sender_alias_path(state_root: &Path) -> PathBuf {
+    state_root.join("sender-aliases.toml")
+}
+
 pub fn default_state_dir() -> Option<PathBuf> {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)

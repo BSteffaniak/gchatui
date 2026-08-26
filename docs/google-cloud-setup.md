@@ -22,7 +22,17 @@ steps will be verified during OAuth implementation. The intended setup is:
 - Message updates are REST-based with manual refresh; Workspace Events/Pub/Sub
   real-time delivery is outside the first release.
 
-Only read-only Chat and directory scopes will be requested. Organization policy can require an
+- If automatic resolution is unavailable, local aliases can be imported from:
+  `sender-aliases.toml` in gchatui's platform state directory:
+
+  ```toml
+  [sender_aliases]
+  "users/123456789" = "Example Person"
+  ```
+
+  Local aliases override remote names and never leave the device.
+
+Only read-only Chat, contacts, memberships, and directory scopes will be requested. Organization policy can require an
 administrator to approve an OAuth client even though the application does not make
 company-wide configuration changes.
 

@@ -333,7 +333,9 @@ version = "0.0.1-alpha.1"
 source = "git+https://github.com/BSteffaniak/bmux.git?branch=master#5d6daa53ffc891d6c63e4fd84a51703785276558"
 dependencies = [
  "bmux_keyboard",
+ "bmux_text_edit",
  "bmux_tui",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1018,6 +1020,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bmux_keyboard",
+ "bmux_text_edit",
  "bmux_tui",
  "bmux_tui_components",
  "bmux_tui_runtime",
@@ -1034,6 +1037,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
+ "url",
  "webbrowser",
  "zeroize",
 ]

@@ -25,6 +25,8 @@ use bmux_tui_components::selectable_list::{
 use bmux_tui_components::status_bar::{
     StatusBar, StatusBarPolicy, StatusBarStyles, StatusSegment, StatusSeverity,
 };
+use bmux_tui_components::text_input::TextInputState;
+use bmux_tui_components::text_input_box::{TextInputBox, TextInputBoxOutcome, TextInputBoxPolicy};
 use bmux_tui_components::text_view::{TextView, TextViewOutcome, TextViewState, TextViewStyles};
 use bmux_tui_runtime::{
     Command, CommandKey, Lifecycle, Program, Runtime, RuntimeConfig, RuntimeEvent, TerminalInput,
@@ -36,6 +38,7 @@ use crate::credential::Secret;
 use crate::keybind::{Action, KeybindingRegistry};
 use crate::people::PeopleClient;
 use crate::product::{Effect, Phase, ProductMessage, ProductState};
+use crate::sender_alias::SenderAliases;
 
 const CANVAS: Color = Color::Rgb(10, 14, 24);
 const SURFACE: Color = Color::Rgb(16, 23, 38);
@@ -66,14 +69,34 @@ pub struct App {
     product: ProductState,
     chat: Arc<ChatClient>,
     people: Arc<PeopleClient>,
+    aliases: Option<SenderAliases>,
     access_token: Option<Arc<Secret>>,
     space_pane: PaneState,
     conversation_pane: PaneState,
     conversation_view: TextViewState,
     help_button: ButtonState,
+    alias_picker: Option<AliasPicker>,
+    alias_editor: Option<AliasEditor>,
     focused_pane: FocusedPane,
     follow_conversation_bottom: bool,
     help_visible: bool,
+}
+
+struct AliasPicker {
+    senders: Vec<AliasSender>,
+    items: Vec<SelectableListItem>,
+    state: SelectableListState,
+}
+
+struct AliasSender {
+    resource_name: String,
+    label: String,
+}
+
+struct AliasEditor {
+    resource_name: String,
+    input: TextInputState,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,11 +116,14 @@ impl App {
             product: ProductState::default(),
             chat: Arc::new(ChatClient::new()),
             people: Arc::new(PeopleClient::new()),
+            aliases: None,
             access_token: None,
             space_pane: PaneState::new(Rect::new(0, 0, 0, 0)),
             conversation_pane: PaneState::new(Rect::new(0, 0, 0, 0)),
             conversation_view: TextViewState::new(),
             help_button: ButtonState::new(),
+            alias_picker: None,
+            alias_editor: None,
             focused_pane: FocusedPane::Spaces,
             follow_conversation_bottom: false,
             help_visible: false,
@@ -147,12 +173,18 @@ impl App {
                         )
                         .await?;
                     let mut messages = page.items;
-                    // Directory lookup is presentation enrichment. If Workspace
-                    // policy denies it, Chat remains usable with stable fallback
-                    // labels derived from sender resource IDs.
-                    let _ = people
+                    match people
                         .resolve_message_senders(token.as_ref(), &mut messages)
-                        .await;
+                        .await
+                    {
+                        Ok(())
+                        | Err(
+                            crate::people::PeopleError::Unauthorized
+                            | crate::people::PeopleError::Forbidden
+                            | crate::people::PeopleError::Malformed
+                            | crate::people::PeopleError::Transport,
+                        ) => {}
+                    }
                     Ok((messages, page.next_page_token))
                 }
                 .await;
@@ -163,6 +195,122 @@ impl App {
                 }))
             })),
         }
+    }
+
+    fn handle_alias_picker(&mut self, event: &Event) -> Update<AppMessage> {
+        let area = alias_picker_content_area(self.conversation_pane.area);
+        let picker = self.alias_picker.as_mut().expect("alias picker checked");
+        match spaces_list(picker.items.as_slice()).handle_event(area, &mut picker.state, event) {
+            SelectableListOutcome::Selected(index) => {
+                if let Some(sender) = picker.senders.get(index) {
+                    let initial = self
+                        .aliases
+                        .as_ref()
+                        .and_then(|aliases| aliases.get(&sender.resource_name))
+                        .unwrap_or_default();
+                    self.alias_editor = Some(AliasEditor {
+                        resource_name: sender.resource_name.clone(),
+                        input: TextInputState::new(bmux_text_edit::TextEditBuffer::from_text(
+                            initial,
+                        )),
+                        error: None,
+                    });
+                    self.alias_picker = None;
+                }
+                Update::reset()
+            }
+            SelectableListOutcome::Focused(_) | SelectableListOutcome::Redraw => Update::redraw(),
+            SelectableListOutcome::Ignored => Update::none(),
+        }
+    }
+
+    fn handle_alias_editor(&mut self, event: &Event) -> Update<AppMessage> {
+        let content = alias_editor_content_area(self.conversation_pane.area);
+        let input_area = Rect::new(content.x, content.y, content.width, 1);
+        let editor = self.alias_editor.as_mut().expect("alias editor checked");
+        let input =
+            TextInputBox::new(bmux_tui_components::text_input::TextInputPolicy::chat_composer())
+                .policy(TextInputBoxPolicy::field().focused(true))
+                .placeholder("Local display name");
+        match input.handle_event(input_area, &mut editor.input, event) {
+            TextInputBoxOutcome::Submitted => {
+                let value = editor.input.buffer().text().to_string();
+                let resource_name = editor.resource_name.clone();
+                match self
+                    .aliases
+                    .as_ref()
+                    .map(|aliases| aliases.set(&resource_name, &value))
+                {
+                    Some(Ok(())) => {
+                        apply_sender_aliases(self);
+                        self.rebuild_projections();
+                        self.alias_editor = None;
+                    }
+                    Some(Err(error)) => editor.error = Some(error.to_string()),
+                    None => editor.error = Some("Local aliases are unavailable".to_string()),
+                }
+                Update::reset()
+            }
+            TextInputBoxOutcome::Edited | TextInputBoxOutcome::Redraw => Update::redraw(),
+            TextInputBoxOutcome::Ignored
+            | TextInputBoxOutcome::EdgeUp
+            | TextInputBoxOutcome::EdgeDown => Update::none(),
+        }
+    }
+
+    fn open_alias_editor(&mut self) -> Update<AppMessage> {
+        self.help_visible = false;
+        if !matches!(self.product.phase, Phase::Ready | Phase::Empty) {
+            return Update::redraw();
+        }
+        let mut by_id = std::collections::BTreeMap::new();
+        for sender in self
+            .product
+            .messages
+            .iter()
+            .filter_map(|message| message.sender.as_ref())
+            .filter(|sender| !sender.resource_name.is_empty())
+        {
+            by_id
+                .entry(sender.resource_name.clone())
+                .or_insert_with(|| {
+                    let label = sender_label(sender);
+                    AliasSender {
+                        resource_name: sender.resource_name.clone(),
+                        label,
+                    }
+                });
+        }
+        let senders = by_id.into_values().collect::<Vec<_>>();
+        if senders.is_empty() {
+            return Update::redraw();
+        }
+        let items = senders
+            .iter()
+            .map(|sender| {
+                SelectableListItem::multiline(
+                    sender.resource_name.clone(),
+                    vec![
+                        Line::from_spans([Span::styled(
+                            sender.label.clone(),
+                            Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
+                        )]),
+                        Line::from_spans([Span::styled(
+                            format!("  {}", sender.resource_name),
+                            Style::new().fg(MUTED),
+                        )]),
+                    ],
+                )
+            })
+            .collect();
+        let mut state = SelectableListState::new(None);
+        state.set_focused(Some(0));
+        self.alias_picker = Some(AliasPicker {
+            senders,
+            items,
+            state,
+        });
+        Update::reset()
     }
 
     fn handle_direct_wheel(&mut self, event: &Event) -> Option<Update<AppMessage>> {
@@ -250,7 +398,38 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn update_terminal(&mut self, event: Event) -> Update<AppMessage> {
+        if self.alias_picker.is_some() {
+            if let Event::Key(stroke) = event
+                && self.bindings.action_for(stroke) == Some(Action::Cancel)
+            {
+                self.alias_picker = None;
+                return Update::reset();
+            }
+            return self.handle_alias_picker(&event);
+        }
+        if self.alias_editor.is_some() {
+            if let Event::Key(stroke) = event
+                && self.bindings.action_for(stroke) == Some(Action::Cancel)
+            {
+                self.alias_editor = None;
+                return Update::reset();
+            }
+            return self.handle_alias_editor(&event);
+        }
+        if self.help_visible {
+            if let Event::Key(stroke) = event
+                && matches!(
+                    self.bindings.action_for(stroke),
+                    Some(Action::Help | Action::Cancel)
+                )
+            {
+                self.help_visible = false;
+                return Update::reset();
+            }
+            return Update::none();
+        }
         if let Event::Key(stroke) = event
             && let Some(action) = self.bindings.action_for(stroke)
         {
@@ -377,10 +556,12 @@ impl App {
 
     fn apply_action(&mut self, action: Action) -> Update<AppMessage> {
         match action {
+            Action::Cancel => Update::none(),
             Action::Quit => Update {
                 lifecycle: Lifecycle::Exit,
                 ..Update::none()
             },
+            Action::SetSenderAlias => self.open_alias_editor(),
             Action::Refresh => self
                 .product
                 .refresh()
@@ -472,6 +653,7 @@ impl Program for App {
             RuntimeEvent::Message(AppMessage::Product(message)) => {
                 let messages_loaded = matches!(message, ProductMessage::MessagesLoaded { .. });
                 self.product.update(message);
+                apply_sender_aliases(self);
                 self.rebuild_projections();
                 if messages_loaded && matches!(self.product.phase, Phase::Ready | Phase::Empty) {
                     self.follow_conversation_bottom = true;
@@ -485,7 +667,11 @@ impl Program for App {
     }
 }
 
-pub async fn run(bindings: KeybindingRegistry, access_token: Option<Secret>) -> Result<()> {
+pub async fn run(
+    bindings: KeybindingRegistry,
+    access_token: Option<Secret>,
+    aliases: Option<SenderAliases>,
+) -> Result<()> {
     let mut guard = CrosstermTerminalGuard::enter(stdout())?;
     let result = {
         let writer = guard.writer_mut().expect("guard should own stdout");
@@ -499,6 +685,7 @@ pub async fn run(bindings: KeybindingRegistry, access_token: Option<Secret>) -> 
             },
         );
         let mut app = App::new(bindings);
+        app.aliases = aliases;
         let startup = access_token.map(|token| {
             app.access_token = Some(Arc::new(token));
         });
@@ -526,6 +713,18 @@ pub async fn run(bindings: KeybindingRegistry, access_token: Option<Secret>) -> 
     };
     let _stdout: Stdout = guard.leave()?;
     result.map_err(Into::into)
+}
+
+fn apply_sender_aliases(app: &mut App) {
+    let Some(aliases) = app.aliases.as_ref() else {
+        return;
+    };
+    for message in &mut app.product.messages {
+        if let Some(sender) = message.sender.as_mut() {
+            sender.display_name =
+                aliases.apply(&sender.resource_name, sender.display_name.as_deref());
+        }
+    }
 }
 
 fn startup_update(app: &mut App) -> Update<AppMessage> {
@@ -778,6 +977,12 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
             &app.help_button,
             frame,
         );
+    if app.alias_picker.is_some() {
+        render_alias_picker(app, frame);
+    }
+    if app.alias_editor.is_some() {
+        render_alias_editor(app, frame);
+    }
     if app.help_visible {
         render_help(app, frame, app.conversation_pane.area);
     }
@@ -1033,6 +1238,113 @@ const fn help_button_area(footer: Rect) -> Rect {
     )
 }
 
+fn alias_picker_area(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(6).clamp(24, 64);
+    let height = area.height.saturating_sub(4).clamp(6, 18);
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
+}
+
+fn alias_picker_content_area(area: Rect) -> Rect {
+    let area = alias_picker_area(area);
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
+}
+
+fn render_alias_picker(app: &mut App, frame: &mut Frame<'_>) {
+    let area = alias_picker_area(app.conversation_pane.area);
+    let Some(picker) = app.alias_picker.as_mut() else {
+        return;
+    };
+    let panel = Pane::new()
+        .title("  CHOOSE SENDER  ·  ENTER SELECTS  ·  ESC CANCELS")
+        .styles(PaneStyles {
+            background: Some(Style::new().bg(SURFACE_RAISED)),
+            border: Style::new().fg(ACCENT).bg(SURFACE_RAISED),
+            focused_border: Style::new().fg(ACCENT_STRONG).bg(SURFACE_RAISED),
+        });
+    let state = PaneState::new(area);
+    panel.render(&state, frame);
+    spaces_list(&picker.items).render_with_fallback_style(
+        panel.inner_area(&state),
+        &picker.state,
+        frame,
+        Style::new().bg(SURFACE_RAISED).fg(TEXT),
+    );
+}
+
+fn alias_editor_area(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(8).clamp(24, 56);
+    let height = area.height.saturating_sub(4).clamp(7, 9);
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
+}
+
+fn alias_editor_content_area(area: Rect) -> Rect {
+    let area = alias_editor_area(area);
+    Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(2),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(4),
+    )
+}
+
+fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
+    let area = alias_editor_area(app.conversation_pane.area);
+    let Some(editor) = app.alias_editor.as_mut() else {
+        return;
+    };
+    let panel = Pane::new()
+        .title("  SET LOCAL SENDER NAME")
+        .styles(PaneStyles {
+            background: Some(Style::new().bg(SURFACE_RAISED)),
+            border: Style::new().fg(ACCENT).bg(SURFACE_RAISED),
+            focused_border: Style::new().fg(ACCENT_STRONG).bg(SURFACE_RAISED),
+        });
+    let state = PaneState::new(area);
+    panel.render(&state, frame);
+    let content = alias_editor_content_area(app.conversation_pane.area);
+    frame
+        .buffer_mut()
+        .fill(content, " ", Style::new().bg(SURFACE_RAISED));
+    let mut input =
+        TextInputBox::new(bmux_tui_components::text_input::TextInputPolicy::chat_composer())
+            .placeholder("Type a local display name…")
+            .policy(TextInputBoxPolicy::bare().focused(true).rows(1, Some(1)));
+    if let Some(error) = editor.error.as_deref() {
+        input = input.error(error);
+    }
+    frame.buffer_mut().write_line(
+        Rect::new(
+            content.x,
+            content.y.saturating_add(content.height.saturating_sub(1)),
+            content.width,
+            1,
+        ),
+        &Line::from_spans([Span::styled(
+            "Enter saves  ·  Esc cancels",
+            Style::new().fg(MUTED),
+        )]),
+    );
+    let input_area = Rect::new(content.x, content.y, content.width, 1);
+    input.render_with_id("sender-alias-input", input_area, &mut editor.input, frame);
+}
+
 fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let overlay = Rect::new(
         area.x.saturating_add(2),
@@ -1154,6 +1466,65 @@ mod tests {
 
     use bmux_tui::event::{MouseButton, MouseEvent, MouseEventKind};
     use bmux_tui::geometry::Point;
+
+    #[test]
+    fn first_sender_in_alias_picker_can_be_selected_immediately() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.phase = Phase::Ready;
+        app.product.messages = vec![crate::model::Message {
+            id: crate::model::MessageId("messages/example".to_string()),
+            thread_id: None,
+            sender: Some(crate::model::Sender {
+                resource_name: "users/first".to_string(),
+                display_name: None,
+                kind: crate::model::SenderKind::Human,
+            }),
+            text: "Synthetic message".to_string(),
+            create_time: "10:42".to_string(),
+            unsupported_content: false,
+        }];
+        let _ = app.open_alias_editor();
+        assert!(app.alias_picker.is_some());
+        assert!(app.alias_editor.is_none());
+
+        let enter = "Enter".parse::<crate::keybind::KeyChord>().unwrap();
+        let _ = app.update_terminal(Event::Key(enter.stroke()));
+        assert!(app.alias_picker.is_none());
+        assert_eq!(
+            app.alias_editor
+                .as_ref()
+                .map(|editor| editor.resource_name.as_str()),
+            Some("users/first")
+        );
+    }
+
+    #[test]
+    fn alias_editor_accepts_and_renders_typed_text() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.conversation_pane.area = Rect::new(30, 2, 70, 22);
+        app.alias_editor = Some(AliasEditor {
+            resource_name: "users/example".to_string(),
+            input: TextInputState::default(),
+            error: None,
+        });
+        for character in "Example Name".chars() {
+            let stroke = crate::keybind::KeyChord::for_character(character.to_ascii_lowercase());
+            let _ = app.update_terminal(Event::Key(stroke.stroke()));
+        }
+        assert_eq!(
+            app.alias_editor.as_ref().unwrap().input.buffer().text(),
+            "example name"
+        );
+        let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 26));
+        let rendered = (0..26)
+            .filter_map(|row| buffer.row_symbols(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("example name"),
+            "rendered frame:\n{rendered}"
+        );
+    }
 
     #[test]
     fn every_rendered_cell_has_an_explicit_opaque_background() {

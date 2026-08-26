@@ -15,6 +15,7 @@ age = { version = "0.12", features = ["ssh"] }
 anyhow = "1.0"
 base64 = "0.22"
 bmux_keyboard = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master" }
+bmux_text_edit = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master" }
 bmux_tui = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
     "crossterm",
 ] }
@@ -25,6 +26,7 @@ bmux_tui_components = { git = "https://github.com/BSteffaniak/bmux.git", branch 
     "scroll-area",
     "selectable-list",
     "status-bar",
+    "text-input-box",
     "text-view",
 ] }
 bmux_tui_runtime = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
@@ -46,6 +48,7 @@ sshenv_vault = { git = "https://github.com/BSteffaniak/sshenv.git", branch = "ma
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["macros", "rt"] }
 toml = "1.0"
+url = "2.0"
 webbrowser = "1.0"
 zeroize = "1.0"
 

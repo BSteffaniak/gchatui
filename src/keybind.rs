@@ -18,6 +18,8 @@ pub enum Action {
     PageUp,
     GoTop,
     GoBottom,
+    Cancel,
+    SetSenderAlias,
     Refresh,
     Help,
     Quit,
@@ -35,6 +37,8 @@ impl Action {
             Self::PageUp => "Page up",
             Self::GoTop => "Top",
             Self::GoBottom => "Bottom",
+            Self::Cancel => "Cancel",
+            Self::SetSenderAlias => "Set sender name",
             Self::Refresh => "Refresh",
             Self::Help => "Help",
             Self::Quit => "Quit",
@@ -48,6 +52,11 @@ pub struct KeyChord(KeyStroke);
 impl KeyChord {
     pub const fn new(stroke: KeyStroke) -> Self {
         Self(stroke)
+    }
+
+    #[cfg(test)]
+    pub const fn for_character(character: char) -> Self {
+        Self(KeyStroke::simple(KeyCode::Char(character)))
     }
 
     #[cfg(test)]
@@ -204,6 +213,8 @@ impl Default for KeybindingRegistry {
             (Action::PageUp, &["PageUp"][..]),
             (Action::GoTop, &["g", "Home"][..]),
             (Action::GoBottom, &["Shift+g", "End"][..]),
+            (Action::Cancel, &["Escape"][..]),
+            (Action::SetSenderAlias, &["a"][..]),
             (Action::Refresh, &["r"][..]),
             (Action::Help, &["?"][..]),
             (Action::Quit, &["q", "Ctrl+c"][..]),

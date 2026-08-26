@@ -8,10 +8,21 @@ use sshenv_vault::{SshenvStore, SshenvStoreConfig, Vault};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+const REQUIRED_GRANT_VERSION: u8 = 3;
 const AUTH_PROFILE: &str = "authentication";
 const REFRESH_TOKEN_KEY: &str = "oauth_refresh_token";
 
 pub type Secret = Zeroizing<String>;
+
+fn encode_refresh_token(token: &Secret) -> Secret {
+    Zeroizing::new(format!("v{REQUIRED_GRANT_VERSION}:{}", token.as_str()))
+}
+
+fn decode_refresh_token(value: &Secret) -> Option<Secret> {
+    value
+        .strip_prefix(&format!("v{REQUIRED_GRANT_VERSION}:"))
+        .map(|token| Zeroizing::new(token.to_string()))
+}
 
 pub trait CredentialStore {
     fn load_refresh_token(&self) -> Result<Option<Secret>, CredentialError>;
@@ -62,6 +73,8 @@ impl SshenvCredentialStore {
         if !store.identity_path.exists() {
             let identity = generate_encrypted_identity(&store.identity_path, passphrase)?;
             store.initialize(&identity.public_key)?;
+        } else if !store.vault_path.exists() {
+            store.initialize(&read_identity_public_key(&store.identity_path)?)?;
         }
         Ok(store)
     }
@@ -74,6 +87,8 @@ impl SshenvCredentialStore {
         if !store.identity_path.exists() {
             let identity = generate_unencrypted_identity(&store.identity_path)?;
             store.initialize(&identity.public_key)?;
+        } else if !store.vault_path.exists() {
+            store.initialize(&read_identity_public_key(&store.identity_path)?)?;
         }
         Ok(store)
     }
@@ -127,11 +142,13 @@ impl CredentialStore for SshenvCredentialStore {
                 .profiles
                 .get(AUTH_PROFILE)
                 .and_then(|values| values.get(REFRESH_TOKEN_KEY))
-                .map(|value| Zeroizing::new(value.clone())));
+                .map(|value| Zeroizing::new(value.clone()))
+                .and_then(|value| decode_refresh_token(&value)));
         }
         self.store
             .get_secret(AUTH_PROFILE, REFRESH_TOKEN_KEY)
             .map_err(CredentialError::Vault)
+            .map(|value| value.and_then(|value| decode_refresh_token(&value)))
     }
 
     fn save_refresh_token(&self, token: Secret) -> Result<(), CredentialError> {
@@ -146,15 +163,21 @@ impl CredentialStore for SshenvCredentialStore {
                     .unlock_profile_with_passphrase(AUTH_PROFILE, &data_key, None)
                     .map_err(CredentialError::Vault)?;
             }
-            vault
-                .profiles
-                .set(AUTH_PROFILE, REFRESH_TOKEN_KEY, token.to_string());
+            vault.profiles.set(
+                AUTH_PROFILE,
+                REFRESH_TOKEN_KEY,
+                encode_refresh_token(&token).to_string(),
+            );
             return vault
                 .save(&self.vault_path, &data_key)
                 .map_err(CredentialError::Vault);
         }
         self.store
-            .set_secret(AUTH_PROFILE, REFRESH_TOKEN_KEY, token)
+            .set_secret(
+                AUTH_PROFILE,
+                REFRESH_TOKEN_KEY,
+                encode_refresh_token(&token),
+            )
             .map_err(CredentialError::Vault)
     }
 
@@ -344,6 +367,21 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), CredentialErro
         .open(path)
         .map_err(CredentialError::Write)?;
     std::io::Write::write_all(&mut file, contents).map_err(CredentialError::Write)
+}
+
+fn read_identity_public_key(identity_path: &Path) -> Result<String, CredentialError> {
+    let public_path = identity_path.with_extension("pub");
+    if public_path.exists() {
+        return fs::read_to_string(public_path)
+            .map(|value| value.trim().to_string())
+            .map_err(CredentialError::Write);
+    }
+    let private =
+        PrivateKey::read_openssh_file(identity_path).map_err(CredentialError::Identity)?;
+    private
+        .public_key()
+        .to_openssh()
+        .map_err(CredentialError::Identity)
 }
 
 fn remove_if_present(path: &Path) -> Result<(), CredentialError> {

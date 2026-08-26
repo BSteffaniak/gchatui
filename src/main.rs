@@ -11,13 +11,17 @@ pub mod model;
 pub mod oauth;
 pub mod people;
 pub mod product;
+pub mod sender_alias;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let path = config::default_config_path();
     let config = config::load(path.as_deref())?;
     let access_token = startup_access_token(&config).await?;
-    app::run(config.keybindings, access_token).await
+    let aliases = config::default_state_dir()
+        .map(|state| sender_alias::SenderAliases::load(config::sender_alias_path(&state)))
+        .transpose()?;
+    app::run(config.keybindings, access_token, aliases).await
 }
 
 async fn startup_access_token(
@@ -53,5 +57,12 @@ async fn startup_access_token(
         }
     };
     let manager = auth_command::ensure_authorized(client_path, store).await?;
-    manager.access_token().await.map(Some).map_err(Into::into)
+    let token = manager.access_token().await?;
+    if std::env::var_os("GCHATUI_SENDER_DIAGNOSTICS").is_some() {
+        let directory_scope = oauth::diagnose_directory_scope(&token)
+            .await
+            .unwrap_or(false);
+        eprintln!("gchatui sender diagnostics: directory_scope={directory_scope}");
+    }
+    Ok(Some(token))
 }
