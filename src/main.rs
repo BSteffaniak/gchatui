@@ -9,6 +9,7 @@ pub mod credential;
 mod keybind;
 pub mod model;
 pub mod oauth;
+pub mod people;
 pub mod product;
 
 #[tokio::main(flavor = "current_thread")]

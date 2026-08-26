@@ -19,6 +19,7 @@ use crate::credential::Secret;
 
 pub const CHAT_SPACES_READONLY: &str = "https://www.googleapis.com/auth/chat.spaces.readonly";
 pub const CHAT_MESSAGES_READONLY: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
+pub const DIRECTORY_READONLY: &str = "https://www.googleapis.com/auth/directory.readonly";
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const LEGACY_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
@@ -356,7 +357,7 @@ pub fn authorization_request(
         .append_pair("state", &state)
         .append_pair(
             "scope",
-            &format!("{CHAT_SPACES_READONLY} {CHAT_MESSAGES_READONLY}"),
+            &format!("{CHAT_SPACES_READONLY} {CHAT_MESSAGES_READONLY} {DIRECTORY_READONLY}"),
         )
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent");
@@ -528,6 +529,7 @@ mod tests {
         let query = request.url.query().unwrap();
         assert!(query.contains("chat.spaces.readonly"));
         assert!(query.contains("chat.messages.readonly"));
+        assert!(query.contains("directory.readonly"));
         assert!(query.contains("code_challenge_method=S256"));
         assert!(!query.contains("chat.spaces+"));
     }

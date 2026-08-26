@@ -26,7 +26,17 @@ pub enum SpaceKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sender {
-    pub display_name: String,
+    pub resource_name: String,
+    pub display_name: Option<String>,
+    pub kind: SenderKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SenderKind {
+    Human,
+    Bot,
+    Anonymous,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

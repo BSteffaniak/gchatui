@@ -34,6 +34,7 @@ use bmux_tui_runtime::{
 use crate::chat::ChatClient;
 use crate::credential::Secret;
 use crate::keybind::{Action, KeybindingRegistry};
+use crate::people::PeopleClient;
 use crate::product::{Effect, Phase, ProductMessage, ProductState};
 
 const CANVAS: Color = Color::Rgb(10, 14, 24);
@@ -64,6 +65,7 @@ pub struct App {
     conversation_lines: Arc<Vec<Line>>,
     product: ProductState,
     chat: Arc<ChatClient>,
+    people: Arc<PeopleClient>,
     access_token: Option<Arc<Secret>>,
     space_pane: PaneState,
     conversation_pane: PaneState,
@@ -90,6 +92,7 @@ impl App {
             conversation_lines: Arc::new(vec![Line::from("Select a space to read messages")]),
             product: ProductState::default(),
             chat: Arc::new(ChatClient::new()),
+            people: Arc::new(PeopleClient::new()),
             access_token: None,
             space_pane: PaneState::new(Rect::new(0, 0, 0, 0)),
             conversation_pane: PaneState::new(Rect::new(0, 0, 0, 0)),
@@ -115,6 +118,7 @@ impl App {
     fn command_for_effect(&self, effect: Effect) -> Option<Command<AppMessage>> {
         let token = self.access_token.clone()?;
         let chat = Arc::clone(&self.chat);
+        let people = Arc::clone(&self.people);
         match effect {
             Effect::LoadSpaces { request_id } => {
                 Some(Command::replace(CommandKey::new("spaces"), async move {
@@ -133,15 +137,25 @@ impl App {
                 space_name,
                 page_token,
             } => Some(Command::replace(CommandKey::new("messages"), async move {
-                let result = chat
-                    .list_messages(
-                        token.as_ref(),
-                        &crate::model::SpaceId(space_name.clone()),
-                        100,
-                        page_token.as_ref(),
-                    )
-                    .await
-                    .map(|page| (page.items, page.next_page_token));
+                let result = async {
+                    let page = chat
+                        .list_messages(
+                            token.as_ref(),
+                            &crate::model::SpaceId(space_name.clone()),
+                            100,
+                            page_token.as_ref(),
+                        )
+                        .await?;
+                    let mut messages = page.items;
+                    // Directory lookup is presentation enrichment. If Workspace
+                    // policy denies it, Chat remains usable with stable fallback
+                    // labels derived from sender resource IDs.
+                    let _ = people
+                        .resolve_message_senders(token.as_ref(), &mut messages)
+                        .await;
+                    Ok((messages, page.next_page_token))
+                }
+                .await;
                 Some(AppMessage::Product(ProductMessage::MessagesLoaded {
                     request_id,
                     space_name,
@@ -610,7 +624,7 @@ fn project_conversation(product: &ProductState) -> Vec<Line> {
         let sender = message
             .sender
             .as_ref()
-            .map_or("Unknown sender", |sender| sender.display_name.as_str());
+            .map_or_else(|| "Unknown sender".to_string(), sender_label);
         let indent = if thread.is_some() { "  " } else { "" };
         lines.push(Line::from_spans(vec![
             Span::styled(
@@ -632,6 +646,25 @@ fn project_conversation(product: &ProductState) -> Vec<Line> {
         lines.push(Line::from(""));
     }
     lines
+}
+
+fn sender_label(sender: &crate::model::Sender) -> String {
+    if let Some(display_name) = sender
+        .display_name
+        .as_deref()
+        .filter(|display_name| !display_name.trim().is_empty())
+    {
+        return display_name.to_string();
+    }
+    match sender.kind {
+        crate::model::SenderKind::Bot => "Chat app".to_string(),
+        crate::model::SenderKind::Anonymous => "Deleted user".to_string(),
+        crate::model::SenderKind::Human | crate::model::SenderKind::Unknown => sender
+            .resource_name
+            .strip_prefix("users/")
+            .filter(|id| !id.is_empty())
+            .map_or_else(|| "Unknown sender".to_string(), |id| format!("User {id}")),
+    }
 }
 
 fn short_id(value: &str) -> &str {
@@ -1183,7 +1216,9 @@ mod tests {
             id: crate::model::MessageId("messages/example".to_string()),
             thread_id: Some(crate::model::ThreadId("threads/example-thread".to_string())),
             sender: Some(crate::model::Sender {
-                display_name: "Example User".to_string(),
+                resource_name: "users/example".to_string(),
+                display_name: Some("Example User".to_string()),
+                kind: crate::model::SenderKind::Human,
             }),
             text: "Synthetic reply".to_string(),
             create_time: "10:42".to_string(),

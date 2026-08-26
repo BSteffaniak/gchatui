@@ -1,8 +1,8 @@
 # Authentication
 
 The first release uses Google installed-app OAuth with a user-provided desktop
-client configuration and only the read-only scopes required to list spaces and
-messages.
+client configuration and only the read-only scopes required to list spaces,
+messages, and resolve sender names through the Workspace directory.
 
 - Access tokens remain in protected process memory.
 - Persistent mode stores the refresh token in an app-specific encrypted sshenv

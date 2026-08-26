@@ -4,7 +4,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::model::{
-    Message, MessageId, Page, PageToken, Sender, Space, SpaceId, SpaceKind, ThreadId,
+    Message, MessageId, Page, PageToken, Sender, SenderKind, Space, SpaceId, SpaceKind, ThreadId,
 };
 
 const CHAT_API: &str = "https://chat.googleapis.com/v1/";
@@ -315,7 +315,13 @@ struct ThreadDto {
 #[serde(rename_all = "camelCase")]
 struct UserDto {
     #[serde(default)]
+    name: String,
+    #[serde(default)]
     display_name: String,
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    is_anonymous: bool,
 }
 
 impl From<MessageDto> for Message {
@@ -324,7 +330,17 @@ impl From<MessageDto> for Message {
             id: MessageId(value.name),
             thread_id: value.thread.map(|thread| ThreadId(thread.name)),
             sender: value.sender.map(|sender| Sender {
-                display_name: sender.display_name,
+                resource_name: sender.name,
+                display_name: (!sender.display_name.is_empty()).then_some(sender.display_name),
+                kind: if sender.is_anonymous {
+                    SenderKind::Anonymous
+                } else {
+                    match sender.r#type.as_str() {
+                        "HUMAN" => SenderKind::Human,
+                        "BOT" => SenderKind::Bot,
+                        _ => SenderKind::Unknown,
+                    }
+                },
             }),
             text: value.text,
             create_time: value.create_time,
