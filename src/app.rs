@@ -880,6 +880,13 @@ const fn pane_styles() -> PaneStyles {
 
 const fn list_styles() -> SelectableListStyles {
     SelectableListStyles {
+        background: Style::new().bg(SURFACE),
+        scrollbar: bmux_tui_components::scrollbar::ScrollbarStyles {
+            begin: Style::new().fg(BORDER).bg(SURFACE),
+            track: Style::new().fg(BORDER).bg(SURFACE),
+            thumb: Style::new().fg(ACCENT).bg(SURFACE),
+            end: Style::new().fg(BORDER).bg(SURFACE),
+        },
         normal: Style::new().fg(TEXT).bg(SURFACE),
         focused: Style::new()
             .fg(TEXT)
