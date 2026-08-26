@@ -209,23 +209,10 @@ impl PeopleClient {
             })
             .filter_map(|sender| chat_user_to_person(&sender.resource_name))
             .collect::<BTreeSet<_>>();
-        if sender_diagnostics_enabled() {
-            let missing_names = senders
-                .iter()
-                .filter(|sender| sender.display_name.is_none())
-                .count();
-            eprintln!(
-                "gchatui sender diagnostics: senders={} missing_names={} eligible={}",
-                senders.len(),
-                missing_names,
-                resource_names.len()
-            );
-        }
         if resource_names.is_empty() {
             return Ok(());
         }
 
-        let requested = resource_names.iter().cloned().collect::<Vec<_>>();
         let mut identity_index = match self.directory_index(access_token).await {
             Ok(directory) => (*directory).clone(),
             Err(PeopleError::Unauthorized | PeopleError::Forbidden | PeopleError::Transport) => {
@@ -271,16 +258,6 @@ impl PeopleClient {
             {
                 sender.display_name = Some(display_name.clone());
             }
-        }
-        if sender_diagnostics_enabled() {
-            let resolved_count = requested
-                .iter()
-                .filter(|name| directory.contains_key(*name) || resolved.contains_key(*name))
-                .count();
-            eprintln!(
-                "gchatui sender diagnostics: directory_entries={} resolved={resolved_count}",
-                directory.len()
-            );
         }
         Ok(())
     }
@@ -363,22 +340,10 @@ impl PeopleClient {
                 .send()
                 .await
                 .map_err(|_| PeopleError::Transport)?;
-            if sender_diagnostics_enabled() {
-                eprintln!(
-                    "gchatui sender diagnostics: directory status={} indexed_so_far={}",
-                    response.status(),
-                    index.len()
-                );
-            }
             match response.status() {
                 status if status.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
-                StatusCode::FORBIDDEN => {
-                    if sender_diagnostics_enabled() {
-                        report_google_error(response).await;
-                    }
-                    return Err(PeopleError::Forbidden);
-                }
+                StatusCode::FORBIDDEN => return Err(PeopleError::Forbidden),
                 _ => return Err(PeopleError::Transport),
             }
             let payload: DirectoryResponse =
@@ -420,13 +385,6 @@ impl PeopleClient {
             .send()
             .await
             .map_err(|_| PeopleError::Transport)?;
-        if sender_diagnostics_enabled() {
-            eprintln!(
-                "gchatui sender diagnostics: people status={} requested={}",
-                response.status(),
-                resource_names.len()
-            );
-        }
         match response.status() {
             status if status.is_success() => {}
             StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
@@ -434,30 +392,6 @@ impl PeopleClient {
             _ => return Err(PeopleError::Transport),
         }
         let payload: BatchResponse = response.json().await.map_err(|_| PeopleError::Malformed)?;
-        if sender_diagnostics_enabled() {
-            let people = payload
-                .responses
-                .iter()
-                .filter(|response| response.person.is_some())
-                .count();
-            let named = payload
-                .responses
-                .iter()
-                .filter_map(|response| response.person.as_ref())
-                .filter(|person| {
-                    person
-                        .names
-                        .iter()
-                        .any(|name| !name.display_name.is_empty())
-                })
-                .count();
-            eprintln!(
-                "gchatui sender diagnostics: people responses={} people={} named={}",
-                payload.responses.len(),
-                people,
-                named
-            );
-        }
         Ok(payload
             .responses
             .into_iter()
@@ -494,52 +428,6 @@ impl Default for PeopleClient {
     fn default() -> Self {
         Self::new()
     }
-}
-
-async fn report_google_error(response: reqwest::Response) {
-    #[derive(Deserialize)]
-    struct Envelope {
-        error: Option<ErrorBody>,
-    }
-    #[derive(Deserialize)]
-    struct ErrorBody {
-        status: Option<String>,
-        #[serde(default)]
-        details: Vec<ErrorDetail>,
-    }
-    #[derive(Deserialize)]
-    struct ErrorDetail {
-        reason: Option<String>,
-    }
-    let Ok(envelope) = response.json::<Envelope>().await else {
-        eprintln!("gchatui sender diagnostics: google_error=unparseable");
-        return;
-    };
-    let status = envelope
-        .error
-        .as_ref()
-        .and_then(|error| error.status.as_deref())
-        .unwrap_or("unknown")
-        .to_string();
-    let reasons = envelope
-        .error
-        .as_ref()
-        .map(|error| {
-            error
-                .details
-                .iter()
-                .filter_map(|detail| detail.reason.clone())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    eprintln!(
-        "gchatui sender diagnostics: google_error_status={status} reasons={}",
-        reasons.join(",")
-    );
-}
-
-fn sender_diagnostics_enabled() -> bool {
-    std::env::var_os("GCHATUI_SENDER_DIAGNOSTICS").is_some()
 }
 
 fn chat_user_to_person(resource_name: &str) -> Option<String> {

@@ -238,33 +238,6 @@ impl RefreshRequest {
     }
 }
 
-pub async fn diagnose_directory_scope(token: &Secret) -> Result<bool, OAuthError> {
-    #[derive(Deserialize)]
-    struct TokenInfo {
-        #[serde(default)]
-        scope: String,
-    }
-    let encoded = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("access_token", token.as_str())
-        .finish();
-    let response = reqwest::Client::new()
-        .get(format!("https://oauth2.googleapis.com/tokeninfo?{encoded}"))
-        .send()
-        .await
-        .map_err(|_| OAuthError::TokenRequest)?;
-    if !response.status().is_success() {
-        return Err(OAuthError::TokenRequest);
-    }
-    let info: TokenInfo = response
-        .json()
-        .await
-        .map_err(|_| OAuthError::MalformedToken)?;
-    Ok(info
-        .scope
-        .split_whitespace()
-        .any(|scope| scope == DIRECTORY_READONLY))
-}
-
 pub async fn revoke(token: &Secret, client: &reqwest::Client) -> Result<(), OAuthError> {
     revoke_at(REVOCATION_ENDPOINT, token, client).await
 }

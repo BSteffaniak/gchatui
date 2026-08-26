@@ -125,21 +125,6 @@ impl ChatClient {
                                 && !matches!(member.kind, SenderKind::Bot | SenderKind::Anonymous)
                         })
                         .collect::<Vec<_>>();
-                    if std::env::var_os("GCHATUI_SENDER_DIAGNOSTICS").is_some() {
-                        eprintln!(
-                            "gchatui dm diagnostics: current_aliases={} candidates={} human={} unknown={}",
-                            current_people.len(),
-                            candidates.len(),
-                            candidates
-                                .iter()
-                                .filter(|member| member.kind == SenderKind::Human)
-                                .count(),
-                            candidates
-                                .iter()
-                                .filter(|member| member.kind == SenderKind::Unknown)
-                                .count()
-                        );
-                    }
                     if candidates.len() != 1 {
                         return None;
                     }

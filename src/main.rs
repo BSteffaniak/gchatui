@@ -61,11 +61,5 @@ async fn startup_access_token(
     };
     let manager = auth_command::ensure_authorized(client_path, store).await?;
     let token = manager.access_token().await?;
-    if std::env::var_os("GCHATUI_SENDER_DIAGNOSTICS").is_some() {
-        let directory_scope = oauth::diagnose_directory_scope(&token)
-            .await
-            .unwrap_or(false);
-        eprintln!("gchatui sender diagnostics: directory_scope={directory_scope}");
-    }
     Ok(Some(token))
 }
