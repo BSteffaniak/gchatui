@@ -7,7 +7,7 @@ use bmux_tui::buffer::Buffer;
 use bmux_tui::crossterm::{CrosstermTerminalGuard, terminal_size};
 use bmux_tui::event::{Event, MouseButton, MouseEventKind};
 use bmux_tui::frame::Frame;
-use bmux_tui::geometry::{Insets, Rect};
+use bmux_tui::geometry::{Insets, Point, Rect};
 use bmux_tui::hit::HitMap;
 use bmux_tui::interaction::InteractionRouter;
 use bmux_tui::prelude::{Color, Line, Modifier, Span, Style};
@@ -696,10 +696,22 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     .render_with_id("conversation-pane", &app.conversation_pane, frame);
 
     let spaces = Arc::clone(&app.space_items);
-    spaces_list(spaces.as_slice()).render(space_list_area(spaces_area), &app.spaces, frame);
+    let list_area = space_list_area(spaces_area);
+    frame
+        .buffer_mut()
+        .fill(list_area, " ", Style::new().bg(SURFACE));
+    spaces_list(spaces.as_slice()).render_with_fallback_style(
+        list_area,
+        &app.spaces,
+        frame,
+        Style::new().fg(TEXT).bg(SURFACE),
+    );
 
     let conversation = Arc::clone(&app.conversation_lines);
     let conversation_area = conversation_content_area(conversation_area);
+    frame
+        .buffer_mut()
+        .fill(conversation_area, " ", Style::new().bg(SURFACE));
     let conversation_view = TextView::new(conversation.as_slice()).styles(TextViewStyles {
         text: Style::new().fg(TEXT).bg(SURFACE),
         empty: Style::new().fg(MUTED).bg(SURFACE),
@@ -749,6 +761,24 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
             Rect::new(area.x, footer_y.saturating_add(1), area.width, 1),
             frame,
         );
+    enforce_opaque_viewport(frame, area);
+}
+
+fn enforce_opaque_viewport(frame: &mut Frame<'_>, area: Rect) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let point = Point::new(x, y);
+            let Some(cell) = frame.buffer_mut().get_mut(point) else {
+                continue;
+            };
+            if cell.style.bg.is_none() || cell.style.bg == Some(Color::Default) {
+                cell.style.bg = Some(CANVAS);
+            }
+            if cell.style.fg == Some(Color::Default) {
+                cell.style.fg = Some(TEXT);
+            }
+        }
+    }
 }
 
 fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -1084,6 +1114,21 @@ mod tests {
 
     use bmux_tui::event::{MouseButton, MouseEvent, MouseEventKind};
     use bmux_tui::geometry::Point;
+
+    #[test]
+    fn every_rendered_cell_has_an_explicit_opaque_background() {
+        let mut app = App::new(KeybindingRegistry::default());
+        let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 30));
+        for cell in buffer.cells() {
+            assert!(
+                cell.style
+                    .bg
+                    .is_some_and(|background| background != Color::Default),
+                "cell {:?} used the transparent terminal background",
+                cell.symbol
+            );
+        }
+    }
 
     #[test]
     fn newly_loaded_messages_follow_latest_and_pane_scrolling_is_isolated() {
