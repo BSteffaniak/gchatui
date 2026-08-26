@@ -115,7 +115,7 @@ impl App {
             bindings,
             interactions: InteractionRouter::new(),
             spaces: SelectableListState::new(Some(0)),
-            space_items: Arc::new(synthetic_spaces()),
+            space_items: Arc::new(Vec::new()),
             conversation_lines: Arc::new(vec![Line::from("Select a space to read messages")]),
             product: ProductState::default(),
             chat: Arc::new(ChatClient::new()),
@@ -832,9 +832,6 @@ fn sync_space_selection(app: &mut App) {
 }
 
 fn project_spaces(product: &ProductState) -> Vec<SelectableListItem> {
-    if product.spaces.is_empty() {
-        return synthetic_spaces();
-    }
     product
         .spaces
         .iter()
@@ -1533,21 +1530,6 @@ fn hints(app: &App) -> Vec<(String, &'static str)> {
         .collect()
 }
 
-fn synthetic_spaces() -> Vec<SelectableListItem> {
-    (1..=30)
-        .map(|index| {
-            let label = match index {
-                1 => "Example Space".to_string(),
-                2 => "Project Discussion".to_string(),
-                3 => "Release Planning".to_string(),
-                4 => "Example User".to_string(),
-                _ => format!("Example Space {index}"),
-            };
-            SelectableListItem::new(format!("space-{index}"), label)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1733,8 +1715,16 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_spaces_are_public_safe() {
-        assert_eq!(synthetic_spaces().len(), 30);
+    fn startup_does_not_render_placeholder_conversations() {
+        let mut app = App::new(KeybindingRegistry::default());
+        let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 20));
+        let rendered = (0..20)
+            .filter_map(|row| buffer.row_symbols(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("CONVERSATIONS"));
+        assert!(!rendered.contains("Example Space"));
+        assert!(!rendered.contains("Project Discussion"));
     }
 
     #[test]
@@ -1746,7 +1736,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("CONVERSATIONS"));
-        assert!(rendered.contains("Example Space"));
+        assert!(!rendered.contains("Example Space"));
         assert!(rendered.contains("MESSAGES"));
         assert!(rendered.contains("HELP"));
         assert!(rendered.contains("Quit"));
@@ -1802,21 +1792,6 @@ mod tests {
     }
 
     #[test]
-    fn mouse_wheel_scrolls_long_space_list() {
-        let mut app = App::new(KeybindingRegistry::default());
-        let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 12));
-        assert_eq!(app.spaces.vertical_scroll(), 0);
-        let point = Point::new(3, 4);
-        for _ in 0..4 {
-            let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
-                MouseEventKind::ScrollDown,
-                point,
-            )));
-        }
-        assert!(app.spaces.vertical_scroll() > 0);
-    }
-
-    #[test]
     fn selecting_real_space_opens_conversation_for_mouse_and_keyboard() {
         let mut app = App::new(KeybindingRegistry::default());
         app.product.spaces = vec![crate::model::Space {
@@ -1825,6 +1800,7 @@ mod tests {
             kind: crate::model::SpaceKind::Space,
         }];
         app.product.phase = Phase::Ready;
+        app.rebuild_projections();
         let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 20));
         let list_area = space_list_area(app.space_pane.area);
         let point = Point::new(list_area.x.saturating_add(2), list_area.y);
@@ -1850,27 +1826,5 @@ mod tests {
             Some("spaces/example")
         );
         assert_eq!(app.product.phase, Phase::LoadingMessages);
-    }
-
-    #[test]
-    fn mouse_click_selects_space_and_keyboard_continues_from_it() {
-        let mut app = App::new(KeybindingRegistry::default());
-        let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 80, 20));
-        let list_area = space_list_area(app.space_pane.area);
-        let point = Point::new(list_area.x.saturating_add(2), list_area.y.saturating_add(4));
-        let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
-            MouseEventKind::Down(MouseButton::Left),
-            point,
-        )));
-        let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
-            MouseEventKind::Up(MouseButton::Left),
-            point,
-        )));
-        assert_eq!(app.spaces.selected(), Some(4));
-
-        let down = "j".parse::<crate::keybind::KeyChord>().unwrap();
-        let _ = app.update_terminal(Event::Key(down.stroke()));
-        assert_eq!(app.spaces.focused(), Some(5));
-        assert_eq!(app.spaces.selected(), Some(5));
     }
 }
