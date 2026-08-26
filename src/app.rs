@@ -1588,6 +1588,29 @@ mod tests {
     use bmux_tui::geometry::Point;
 
     #[test]
+    fn text_view_code_viewports_are_stable_across_scroll_offsets() {
+        let lines = vec![
+            Line::from("fn main() {"),
+            Line::from("    let value = very_long_function_name(argument_one, argument_two);"),
+            Line::from("    println!(\"👩🏽‍💻 {value}\");"),
+            Line::from("}"),
+        ];
+        let view = TextView::new(&lines);
+        let area = Rect::new(0, 0, 24, 3);
+        let canonical = view.layout(area, &TextViewState::new()).lines;
+        for offset in 0..canonical.len() {
+            let mut state = TextViewState::new();
+            state.set_vertical_scroll(offset);
+            let layout = view.layout(area, &state);
+            assert_eq!(layout.lines, canonical);
+            assert_eq!(
+                layout.vertical_scroll,
+                offset.min(canonical.len().saturating_sub(usize::from(area.height)))
+            );
+        }
+    }
+
+    #[test]
     fn first_sender_in_alias_picker_can_be_selected_immediately() {
         let mut app = App::new(KeybindingRegistry::default());
         app.product.phase = Phase::Ready;

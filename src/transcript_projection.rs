@@ -174,10 +174,12 @@ fn append_message(
             Style::new().fg(colors.muted),
         ),
     ]));
-    lines.push(Line::from_spans([Span::styled(
-        format!("{indent}{}", message.text),
-        Style::new().fg(colors.text),
-    )]));
+    for physical_line in normalized_message_lines(&message.text) {
+        lines.push(Line::from_spans([Span::styled(
+            format!("{indent}{physical_line}"),
+            Style::new().fg(colors.text),
+        )]));
+    }
     if message.unsupported_content {
         lines.push(Line::from_spans([Span::styled(
             format!("{indent}◇ Rich content is not available in the terminal"),
@@ -185,6 +187,32 @@ fn append_message(
         )]));
     }
     lines.push(Line::from(""));
+}
+
+fn normalized_message_lines(text: &str) -> Vec<String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .split('\n')
+        .map(|line| {
+            let mut output = String::new();
+            let mut column = 0usize;
+            for character in line.chars() {
+                match character {
+                    '\t' => {
+                        let spaces = 4usize.saturating_sub(column % 4);
+                        output.extend(std::iter::repeat_n(' ', spaces));
+                        column = column.saturating_add(spaces);
+                    }
+                    character if character.is_control() => {}
+                    character => {
+                        output.push(character);
+                        column = column.saturating_add(1);
+                    }
+                }
+            }
+            output
+        })
+        .collect()
 }
 
 fn participant_summary(participants: &BTreeSet<String>) -> String {
@@ -245,6 +273,29 @@ mod tests {
             warning: Color::Yellow,
             border: Color::BrightBlack,
         }
+    }
+
+    #[test]
+    fn multiline_code_is_projected_as_real_rows_with_deterministic_tabs() {
+        let mut code = message("code", "09:00", None, false);
+        code.text = "fn main() {\n\tprintln!(\"hi 👩🏽‍💻\");\n}\n".to_string();
+        let projection = project(
+            &[code],
+            |sender| sender.display_name.clone().unwrap(),
+            colors(),
+        );
+        let rows = projection
+            .lines
+            .iter()
+            .map(Line::plain_text)
+            .collect::<Vec<_>>();
+        assert!(rows.iter().any(|row| row == "fn main() {"));
+        assert!(rows.iter().any(|row| row == "    println!(\"hi 👩🏽‍💻\");"));
+        assert!(rows.iter().any(|row| row == "}"));
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains('\n') && !row.contains('\t'))
+        );
     }
 
     #[test]
