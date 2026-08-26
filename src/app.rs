@@ -60,6 +60,8 @@ pub struct App {
     bindings: KeybindingRegistry,
     interactions: InteractionRouter,
     spaces: SelectableListState,
+    space_items: Arc<Vec<SelectableListItem>>,
+    conversation_lines: Arc<Vec<Line>>,
     product: ProductState,
     chat: Arc<ChatClient>,
     access_token: Option<Arc<Secret>>,
@@ -84,6 +86,8 @@ impl App {
             bindings,
             interactions: InteractionRouter::new(),
             spaces: SelectableListState::new(Some(0)),
+            space_items: Arc::new(synthetic_spaces()),
+            conversation_lines: Arc::new(vec![Line::from("Select a space to read messages")]),
             product: ProductState::default(),
             chat: Arc::new(ChatClient::new()),
             access_token: None,
@@ -95,6 +99,11 @@ impl App {
             follow_conversation_bottom: false,
             help_visible: false,
         }
+    }
+
+    fn rebuild_projections(&mut self) {
+        self.space_items = Arc::new(project_spaces(&self.product));
+        self.conversation_lines = Arc::new(project_conversation(&self.product));
     }
 
     const fn focus_spaces_pane(&mut self) {
@@ -142,6 +151,43 @@ impl App {
         }
     }
 
+    fn handle_direct_wheel(&mut self, event: &Event) -> Option<Update<AppMessage>> {
+        let Event::Mouse(mouse) = event else {
+            return None;
+        };
+        let delta = match mouse.kind {
+            MouseEventKind::ScrollUp => -3,
+            MouseEventKind::ScrollDown => 3,
+            MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+            | MouseEventKind::Down(_)
+            | MouseEventKind::Up(_)
+            | MouseEventKind::Drag(_)
+            | MouseEventKind::Move => return None,
+        };
+        if self.conversation_pane.area.contains(mouse.position) {
+            let current =
+                i32::try_from(self.conversation_view.vertical_scroll()).unwrap_or(i32::MAX);
+            let next = usize::try_from(current.saturating_add(delta).max(0)).unwrap_or(usize::MAX);
+            if next == self.conversation_view.vertical_scroll() {
+                return Some(Update::none());
+            }
+            self.conversation_view.set_vertical_scroll(next);
+            self.follow_conversation_bottom = false;
+            return Some(Update::redraw());
+        }
+        if self.space_pane.area.contains(mouse.position) {
+            let current = i32::try_from(self.spaces.vertical_scroll()).unwrap_or(i32::MAX);
+            let next = usize::try_from(current.saturating_add(delta).max(0)).unwrap_or(usize::MAX);
+            if next == self.spaces.vertical_scroll() {
+                return Some(Update::none());
+            }
+            self.spaces.set_vertical_scroll(next);
+            return Some(Update::redraw());
+        }
+        None
+    }
+
     fn handle_space_event(&mut self, event: &Event) -> Option<Update<AppMessage>> {
         if let Event::Mouse(mouse) = event
             && !self.space_pane.area.contains(mouse.position)
@@ -151,8 +197,8 @@ impl App {
         if matches!(event, Event::Key(_)) && self.focused_pane != FocusedPane::Spaces {
             return None;
         }
-        let spaces = displayed_spaces(self);
-        let mut outcome = spaces_list(&spaces).handle_event(
+        let spaces = Arc::clone(&self.space_items);
+        let mut outcome = spaces_list(spaces.as_slice()).handle_event(
             space_list_area(self.space_pane.area),
             &mut self.spaces,
             event,
@@ -197,17 +243,20 @@ impl App {
             return self.apply_action(action);
         }
 
+        if let Some(update) = self.handle_direct_wheel(&event) {
+            return update;
+        }
         if let Some(update) = self.handle_space_event(&event) {
             return update;
         }
 
-        let conversation_lines = conversation_lines(self);
+        let conversation_lines = Arc::clone(&self.conversation_lines);
         let conversation_outcome = if let Event::Mouse(mouse) = event
             && !self.conversation_pane.area.contains(mouse.position)
         {
             TextViewOutcome::Ignored
         } else {
-            TextView::new(&conversation_lines).handle_event(
+            TextView::new(conversation_lines.as_slice()).handle_event(
                 conversation_content_area(self.conversation_pane.area),
                 &mut self.conversation_view,
                 &event,
@@ -282,16 +331,16 @@ impl App {
                     Action::PageUp => self.spaces.vertical_scroll().saturating_sub(amount),
                     Action::GoTop => 0,
                     Action::GoBottom => {
-                        spaces_list(&displayed_spaces(self)).max_vertical_scroll(area)
+                        spaces_list(self.space_items.as_slice()).max_vertical_scroll(area)
                     }
                     _ => self.spaces.vertical_scroll(),
                 };
                 self.spaces.set_vertical_scroll(next);
             }
             FocusedPane::Conversation => {
-                let lines = conversation_lines(self);
+                let lines = Arc::clone(&self.conversation_lines);
                 let area = conversation_content_area(self.conversation_pane.area);
-                let view = TextView::new(&lines);
+                let view = TextView::new(lines.as_slice());
                 let amount = usize::from(area.height.max(1));
                 let next = match action {
                     Action::PageDown => self
@@ -374,7 +423,7 @@ impl App {
                 Update::redraw()
             }
             Action::MoveDown => {
-                let item_count = displayed_spaces(self).len();
+                let item_count = self.space_items.len();
                 let next = self
                     .spaces
                     .focused()
@@ -409,6 +458,7 @@ impl Program for App {
             RuntimeEvent::Message(AppMessage::Product(message)) => {
                 let messages_loaded = matches!(message, ProductMessage::MessagesLoaded { .. });
                 self.product.update(message);
+                self.rebuild_projections();
                 if messages_loaded && matches!(self.product.phase, Phase::Ready | Phase::Empty) {
                     self.follow_conversation_bottom = true;
                 }
@@ -490,11 +540,11 @@ fn sync_space_selection(app: &mut App) {
     app.spaces.set_focused(Some(selected));
 }
 
-fn displayed_spaces(app: &App) -> Vec<SelectableListItem> {
-    if app.product.spaces.is_empty() {
+fn project_spaces(product: &ProductState) -> Vec<SelectableListItem> {
+    if product.spaces.is_empty() {
         return synthetic_spaces();
     }
-    app.product
+    product
         .spaces
         .iter()
         .map(|space| {
@@ -530,9 +580,9 @@ fn displayed_spaces(app: &App) -> Vec<SelectableListItem> {
         .collect()
 }
 
-fn conversation_lines(app: &App) -> Vec<Line> {
-    if app.product.messages.is_empty() {
-        return vec![Line::from(match app.product.phase {
+fn project_conversation(product: &ProductState) -> Vec<Line> {
+    if product.messages.is_empty() {
+        return vec![Line::from(match product.phase {
             Phase::LoadingMessages | Phase::Refreshing => "Loading messages…",
             Phase::Empty => "No messages",
             Phase::RecoverableError => "Unable to load messages. Refresh to retry.",
@@ -542,7 +592,7 @@ fn conversation_lines(app: &App) -> Vec<Line> {
     }
     let mut lines = Vec::new();
     let mut current_thread: Option<&str> = None;
-    for message in &app.product.messages {
+    for message in &product.messages {
         let thread = message.thread_id.as_ref().map(|thread| thread.0.as_str());
         if thread != current_thread {
             if let Some(thread) = thread {
@@ -645,12 +695,12 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     ]))
     .render_with_id("conversation-pane", &app.conversation_pane, frame);
 
-    let spaces = displayed_spaces(app);
-    spaces_list(&spaces).render(space_list_area(spaces_area), &app.spaces, frame);
+    let spaces = Arc::clone(&app.space_items);
+    spaces_list(spaces.as_slice()).render(space_list_area(spaces_area), &app.spaces, frame);
 
-    let conversation = conversation_lines(app);
+    let conversation = Arc::clone(&app.conversation_lines);
     let conversation_area = conversation_content_area(conversation_area);
-    let conversation_view = TextView::new(&conversation).styles(TextViewStyles {
+    let conversation_view = TextView::new(conversation.as_slice()).styles(TextViewStyles {
         text: Style::new().fg(TEXT).bg(SURFACE),
         empty: Style::new().fg(MUTED).bg(SURFACE),
         background: Style::new().bg(SURFACE),
@@ -1050,6 +1100,7 @@ mod tests {
             });
         }
         app.product.phase = Phase::Ready;
+        app.rebuild_projections();
         app.follow_conversation_bottom = true;
         let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 24));
         assert!(app.conversation_view.vertical_scroll() > 0);
@@ -1086,7 +1137,9 @@ mod tests {
             create_time: "10:42".to_string(),
             unsupported_content: false,
         }];
-        let rendered = conversation_lines(&app)
+        app.rebuild_projections();
+        let rendered = app
+            .conversation_lines
             .iter()
             .map(Line::plain_text)
             .collect::<Vec<_>>()
