@@ -33,6 +33,7 @@ bmux_tui_runtime = { git = "https://github.com/BSteffaniak/bmux.git", branch = "
     "crossterm",
 ] }
 dirs = "6.0"
+futures-util = "0.3"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = [
     "form",

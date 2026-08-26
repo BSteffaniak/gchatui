@@ -8,7 +8,7 @@ use sshenv_vault::{SshenvStore, SshenvStoreConfig, Vault};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const REQUIRED_GRANT_VERSION: u8 = 3;
+const REQUIRED_GRANT_VERSION: u8 = 4;
 const AUTH_PROFILE: &str = "authentication";
 const REFRESH_TOKEN_KEY: &str = "oauth_refresh_token";
 

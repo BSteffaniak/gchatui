@@ -21,6 +21,7 @@ pub const CHAT_SPACES_READONLY: &str = "https://www.googleapis.com/auth/chat.spa
 pub const CHAT_MESSAGES_READONLY: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
 pub const DIRECTORY_READONLY: &str = "https://www.googleapis.com/auth/directory.readonly";
 pub const CONTACTS_READONLY: &str = "https://www.googleapis.com/auth/contacts.readonly";
+pub const USERINFO_PROFILE: &str = "https://www.googleapis.com/auth/userinfo.profile";
 pub const CHAT_MEMBERSHIPS_READONLY: &str =
     "https://www.googleapis.com/auth/chat.memberships.readonly";
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -388,7 +389,7 @@ pub fn authorization_request(
         .append_pair(
             "scope",
             &format!(
-                "{CHAT_SPACES_READONLY} {CHAT_MESSAGES_READONLY} {DIRECTORY_READONLY} {CONTACTS_READONLY} {CHAT_MEMBERSHIPS_READONLY}"
+                "{CHAT_SPACES_READONLY} {CHAT_MESSAGES_READONLY} {DIRECTORY_READONLY} {CONTACTS_READONLY} {CHAT_MEMBERSHIPS_READONLY} {USERINFO_PROFILE}"
             ),
         )
         .append_pair("access_type", "offline")
@@ -564,6 +565,7 @@ mod tests {
         assert!(query.contains("directory.readonly"));
         assert!(query.contains("contacts.readonly"));
         assert!(query.contains("chat.memberships.readonly"));
+        assert!(query.contains("userinfo.profile"));
         assert!(query.contains("code_challenge_method=S256"));
         assert!(!query.contains("chat.spaces+"));
     }

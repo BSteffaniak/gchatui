@@ -57,6 +57,10 @@ const ERROR: Color = Color::Rgb(248, 113, 113);
 pub enum AppMessage {
     Start,
     Product(ProductMessage),
+    MessagesWithIdentity {
+        message: ProductMessage,
+        current_user: Option<(std::collections::BTreeSet<String>, Option<String>)>,
+    },
     InputError(std::io::Error),
 }
 
@@ -69,7 +73,7 @@ pub struct App {
     product: ProductState,
     chat: Arc<ChatClient>,
     people: Arc<PeopleClient>,
-    aliases: Option<SenderAliases>,
+    aliases: Option<Arc<SenderAliases>>,
     access_token: Option<Arc<Secret>>,
     space_pane: PaneState,
     conversation_pane: PaneState,
@@ -145,13 +149,23 @@ impl App {
         let token = self.access_token.clone()?;
         let chat = Arc::clone(&self.chat);
         let people = Arc::clone(&self.people);
+        let aliases = self.aliases.clone();
         match effect {
             Effect::LoadSpaces { request_id } => {
                 Some(Command::replace(CommandKey::new("spaces"), async move {
-                    let result = chat
-                        .list_spaces(token.as_ref(), 100, None)
-                        .await
-                        .map(|page| (page.items, page.next_page_token));
+                    let result = match chat.list_spaces(token.as_ref(), 100, None).await {
+                        Ok(mut page) => {
+                            chat.infer_direct_message_titles(
+                                token.as_ref(),
+                                &mut page.items,
+                                &people,
+                                aliases.as_deref(),
+                            )
+                            .await;
+                            Ok((page.items, page.next_page_token))
+                        }
+                        Err(error) => Err(error),
+                    };
                     Some(AppMessage::Product(ProductMessage::SpacesLoaded {
                         request_id,
                         result,
@@ -163,36 +177,37 @@ impl App {
                 space_name,
                 page_token,
             } => Some(Command::replace(CommandKey::new("messages"), async move {
-                let result = async {
-                    let page = chat
-                        .list_messages(
-                            token.as_ref(),
-                            &crate::model::SpaceId(space_name.clone()),
-                            100,
-                            page_token.as_ref(),
-                        )
-                        .await?;
-                    let mut messages = page.items;
-                    match people
-                        .resolve_message_senders(token.as_ref(), &mut messages)
-                        .await
-                    {
-                        Ok(())
-                        | Err(
-                            crate::people::PeopleError::Unauthorized
-                            | crate::people::PeopleError::Forbidden
-                            | crate::people::PeopleError::Malformed
-                            | crate::people::PeopleError::Transport,
-                        ) => {}
+                let page = match chat
+                    .list_messages(
+                        token.as_ref(),
+                        &crate::model::SpaceId(space_name.clone()),
+                        100,
+                        page_token.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(error) => {
+                        return Some(AppMessage::Product(ProductMessage::MessagesLoaded {
+                            request_id,
+                            space_name,
+                            result: Err(error),
+                        }));
                     }
-                    Ok((messages, page.next_page_token))
-                }
-                .await;
-                Some(AppMessage::Product(ProductMessage::MessagesLoaded {
-                    request_id,
-                    space_name,
-                    result,
-                }))
+                };
+                let mut messages = page.items;
+                let _ = people
+                    .resolve_message_senders(token.as_ref(), &mut messages)
+                    .await;
+                let current_user = people.current_user(token.as_ref()).await.ok();
+                Some(AppMessage::MessagesWithIdentity {
+                    message: ProductMessage::MessagesLoaded {
+                        request_id,
+                        space_name,
+                        result: Ok((messages, page.next_page_token)),
+                    },
+                    current_user,
+                })
             })),
         }
     }
@@ -650,6 +665,18 @@ impl Program for App {
         match event {
             RuntimeEvent::Terminal(event) => Ok(self.update_terminal(event)),
             RuntimeEvent::Message(AppMessage::Start) => Ok(startup_update(self)),
+            RuntimeEvent::Message(AppMessage::MessagesWithIdentity {
+                message,
+                current_user,
+            }) => {
+                self.product.update(message);
+                apply_sender_aliases(self);
+                infer_direct_message_name(self, current_user.as_ref());
+                self.rebuild_projections();
+                self.follow_conversation_bottom = true;
+                sync_space_selection(self);
+                Ok(Update::reset())
+            }
             RuntimeEvent::Message(AppMessage::Product(message)) => {
                 let messages_loaded = matches!(message, ProductMessage::MessagesLoaded { .. });
                 self.product.update(message);
@@ -670,7 +697,7 @@ impl Program for App {
 pub async fn run(
     bindings: KeybindingRegistry,
     access_token: Option<Secret>,
-    aliases: Option<SenderAliases>,
+    aliases: Option<Arc<SenderAliases>>,
 ) -> Result<()> {
     let mut guard = CrosstermTerminalGuard::enter(stdout())?;
     let result = {
@@ -713,6 +740,57 @@ pub async fn run(
     };
     let _stdout: Stdout = guard.leave()?;
     result.map_err(Into::into)
+}
+
+fn infer_direct_message_name(
+    app: &mut App,
+    current_user: Option<&(std::collections::BTreeSet<String>, Option<String>)>,
+) {
+    let Some(selected_id) = app.product.selected_space.as_deref() else {
+        return;
+    };
+    let Some(space) = app
+        .product
+        .spaces
+        .iter_mut()
+        .find(|space| space.id.0 == selected_id)
+    else {
+        return;
+    };
+    if space.kind != crate::model::SpaceKind::DirectMessage || !space.display_name.trim().is_empty()
+    {
+        return;
+    }
+    let current_people = current_user
+        .map(|(resource_names, _)| resource_names)
+        .cloned()
+        .unwrap_or_default();
+    let candidate = app
+        .product
+        .messages
+        .iter()
+        .filter_map(|message| message.sender.as_ref())
+        .filter(|sender| {
+            chat_user_to_person_name(&sender.resource_name)
+                .is_none_or(|person| !current_people.contains(&person))
+        })
+        .find_map(|sender| {
+            sender.display_name.clone().or_else(|| {
+                app.aliases
+                    .as_ref()
+                    .and_then(|aliases| aliases.get(&sender.resource_name))
+            })
+        });
+    if let Some(name) = candidate {
+        space.display_name = name;
+    }
+}
+
+fn chat_user_to_person_name(resource_name: &str) -> Option<String> {
+    resource_name
+        .strip_prefix("users/")
+        .filter(|id| !id.is_empty() && *id != "app")
+        .map(|id| format!("people/{id}"))
 }
 
 fn apply_sender_aliases(app: &mut App) {
@@ -804,47 +882,61 @@ fn project_conversation(product: &ProductState) -> Vec<Line> {
         })];
     }
     let mut lines = Vec::new();
-    let mut current_thread: Option<&str> = None;
-    for message in &product.messages {
+    let mut index = 0;
+    while index < product.messages.len() {
+        let message = &product.messages[index];
         let thread = message.thread_id.as_ref().map(|thread| thread.0.as_str());
-        if thread != current_thread {
-            if let Some(thread) = thread {
-                lines.push(Line::from_spans(vec![
-                    Span::styled("┌─ ", Style::new().fg(BORDER)),
-                    Span::styled(
-                        format!("THREAD {}", short_id(thread).to_uppercase()),
-                        Style::new().fg(MUTED).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" ─", Style::new().fg(BORDER)),
-                ]));
-            }
-            current_thread = thread;
+        let run_length = thread.map_or(1, |thread_id| {
+            product.messages[index..]
+                .iter()
+                .take_while(|candidate| {
+                    candidate.thread_id.as_ref().map(|value| value.0.as_str()) == Some(thread_id)
+                })
+                .count()
+        });
+        let grouped = thread.is_some() && run_length >= 2;
+        if grouped {
+            lines.push(Line::from_spans(vec![
+                Span::styled("┌─ ", Style::new().fg(BORDER)),
+                Span::styled(
+                    format!("{run_length} MESSAGES IN THREAD"),
+                    Style::new().fg(MUTED).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ─", Style::new().fg(BORDER)),
+            ]));
         }
-        let sender = message
-            .sender
-            .as_ref()
-            .map_or_else(|| "Unknown sender".to_string(), sender_label);
-        let indent = if thread.is_some() { "  " } else { "" };
-        lines.push(Line::from_spans(vec![
-            Span::styled(
-                format!("{indent}{sender}"),
-                Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {}", message.create_time), Style::new().fg(MUTED)),
-        ]));
-        lines.push(Line::from_spans(vec![Span::styled(
-            format!("{indent}{}", message.text),
-            Style::new().fg(TEXT),
-        )]));
-        if message.unsupported_content {
-            lines.push(Line::from_spans(vec![Span::styled(
-                format!("{indent}◇ Rich content is not available in the terminal"),
-                Style::new().fg(WARNING),
-            )]));
+        for message in &product.messages[index..index.saturating_add(run_length)] {
+            append_message_lines(&mut lines, message, grouped);
         }
-        lines.push(Line::from(""));
+        index = index.saturating_add(run_length);
     }
     lines
+}
+
+fn append_message_lines(lines: &mut Vec<Line>, message: &crate::model::Message, grouped: bool) {
+    let sender = message
+        .sender
+        .as_ref()
+        .map_or_else(|| "Unknown sender".to_string(), sender_label);
+    let indent = if grouped { "  " } else { "" };
+    lines.push(Line::from_spans(vec![
+        Span::styled(
+            format!("{indent}{sender}"),
+            Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {}", message.create_time), Style::new().fg(MUTED)),
+    ]));
+    lines.push(Line::from_spans(vec![Span::styled(
+        format!("{indent}{}", message.text),
+        Style::new().fg(TEXT),
+    )]));
+    if message.unsupported_content {
+        lines.push(Line::from_spans(vec![Span::styled(
+            format!("{indent}◇ Rich content is not available in the terminal"),
+            Style::new().fg(WARNING),
+        )]));
+    }
+    lines.push(Line::from(""));
 }
 
 fn sender_label(sender: &crate::model::Sender) -> String {
@@ -864,10 +956,6 @@ fn sender_label(sender: &crate::model::Sender) -> String {
             .filter(|id| !id.is_empty())
             .map_or_else(|| "Unknown sender".to_string(), |id| format!("User {id}")),
     }
-}
-
-fn short_id(value: &str) -> &str {
-    value.rsplit('/').next().unwrap_or(value)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1581,6 +1669,30 @@ mod tests {
     }
 
     #[test]
+    fn multi_message_thread_groups_without_exposing_thread_id() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.messages = (0..2)
+            .map(|index| crate::model::Message {
+                id: crate::model::MessageId(format!("messages/{index}")),
+                thread_id: Some(crate::model::ThreadId("threads/private-id".to_string())),
+                sender: None,
+                text: format!("Synthetic reply {index}"),
+                create_time: format!("10:4{index}"),
+                unsupported_content: false,
+            })
+            .collect();
+        app.rebuild_projections();
+        let rendered = app
+            .conversation_lines
+            .iter()
+            .map(Line::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("2 MESSAGES IN THREAD"));
+        assert!(!rendered.contains("private-id"));
+    }
+
+    #[test]
     fn conversation_groups_thread_replies() {
         let mut app = App::new(KeybindingRegistry::default());
         app.product.messages = vec![crate::model::Message {
@@ -1602,9 +1714,11 @@ mod tests {
             .map(Line::plain_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("THREAD example-thread".to_uppercase().as_str()));
-        assert!(rendered.contains("  Example User"));
-        assert!(rendered.contains("  Synthetic reply"));
+        assert!(!rendered.contains("example-thread"));
+        assert!(!rendered.contains("MESSAGES IN THREAD"));
+        assert!(rendered.contains("Example User"));
+        assert!(!rendered.contains("  Example User"));
+        assert!(rendered.contains("Synthetic reply"));
     }
 
     #[test]

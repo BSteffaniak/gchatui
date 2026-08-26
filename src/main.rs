@@ -19,7 +19,10 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load(path.as_deref())?;
     let access_token = startup_access_token(&config).await?;
     let aliases = config::default_state_dir()
-        .map(|state| sender_alias::SenderAliases::load(config::sender_alias_path(&state)))
+        .map(|state| {
+            sender_alias::SenderAliases::load(config::sender_alias_path(&state))
+                .map(std::sync::Arc::new)
+        })
         .transpose()?;
     app::run(config.keybindings, access_token, aliases).await
 }

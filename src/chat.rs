@@ -89,6 +89,105 @@ impl ChatClient {
         }
     }
 
+    pub async fn infer_direct_message_titles(
+        &self,
+        access_token: &Zeroizing<String>,
+        spaces: &mut [Space],
+        people: &crate::people::PeopleClient,
+        aliases: Option<&crate::sender_alias::SenderAliases>,
+    ) {
+        use futures_util::stream::{self, StreamExt};
+
+        let current_user = people.current_user(access_token).await.ok();
+        let current_people = current_user
+            .as_ref()
+            .map(|(resource_names, _)| resource_names)
+            .cloned()
+            .unwrap_or_default();
+        let unresolved = spaces
+            .iter()
+            .enumerate()
+            .filter(|(_, space)| {
+                space.kind == SpaceKind::DirectMessage && space.display_name.trim().is_empty()
+            })
+            .map(|(index, space)| (index, space.id.clone()))
+            .collect::<Vec<_>>();
+        let resolved = stream::iter(unresolved)
+            .map(|(index, space_id)| {
+                let current_people = current_people.clone();
+                async move {
+                    let members = self.list_members(access_token, &space_id).await.ok()?;
+                    let mut candidates = members
+                        .into_iter()
+                        .filter(|member| {
+                            chat_user_to_person(&member.resource_name)
+                                .is_none_or(|person| !current_people.contains(&person))
+                                && !matches!(member.kind, SenderKind::Bot | SenderKind::Anonymous)
+                        })
+                        .collect::<Vec<_>>();
+                    if std::env::var_os("GCHATUI_SENDER_DIAGNOSTICS").is_some() {
+                        eprintln!(
+                            "gchatui dm diagnostics: current_aliases={} candidates={} human={} unknown={}",
+                            current_people.len(),
+                            candidates.len(),
+                            candidates
+                                .iter()
+                                .filter(|member| member.kind == SenderKind::Human)
+                                .count(),
+                            candidates
+                                .iter()
+                                .filter(|member| member.kind == SenderKind::Unknown)
+                                .count()
+                        );
+                    }
+                    if candidates.len() != 1 {
+                        return None;
+                    }
+                    let _ = people.resolve_senders(access_token, &mut candidates).await;
+                    let other = candidates.pop()?;
+                    let alias = aliases.and_then(|aliases| aliases.get(&other.resource_name));
+                    let name = alias.or(other.display_name).or_else(|| {
+                        other
+                            .resource_name
+                            .strip_prefix("users/")
+                            .map(|id| format!("User {id}"))
+                    })?;
+                    Some((index, name))
+                }
+            })
+            .buffer_unordered(8)
+            .filter_map(std::future::ready)
+            .collect::<Vec<_>>()
+            .await;
+        for (index, name) in resolved {
+            if let Some(space) = spaces.get_mut(index) {
+                space.display_name = name;
+            }
+        }
+    }
+
+    async fn list_members(
+        &self,
+        access_token: &Zeroizing<String>,
+        space: &SpaceId,
+    ) -> Result<Vec<Sender>, ChatError> {
+        let path = format!("{}/members", space.0.trim_start_matches('/'));
+        let mut url = self
+            .base_url
+            .join(&path)
+            .map_err(|_| ChatError::Malformed)?;
+        url.query_pairs_mut().append_pair("pageSize", "1000");
+        let response = self.get_with_retry(url, access_token).await?;
+        let response = ensure_success(response)?;
+        let payload: ListMembershipsResponse =
+            response.json().await.map_err(|_| ChatError::Malformed)?;
+        Ok(payload
+            .memberships
+            .into_iter()
+            .filter_map(|membership| membership.member.map(Into::into))
+            .collect())
+    }
+
     pub async fn list_spaces_cancelable(
         &self,
         access_token: &Zeroizing<String>,
@@ -248,6 +347,43 @@ fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, Chat
     }
 }
 
+fn chat_user_to_person(resource_name: &str) -> Option<String> {
+    resource_name
+        .strip_prefix("users/")
+        .filter(|id| !id.is_empty() && *id != "app")
+        .map(|id| format!("people/{id}"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListMembershipsResponse {
+    #[serde(default)]
+    memberships: Vec<MembershipDto>,
+}
+
+#[derive(Deserialize)]
+struct MembershipDto {
+    member: Option<UserDto>,
+}
+
+impl From<UserDto> for Sender {
+    fn from(user: UserDto) -> Self {
+        Self {
+            resource_name: user.name,
+            display_name: (!user.display_name.is_empty()).then_some(user.display_name),
+            kind: if user.is_anonymous {
+                SenderKind::Anonymous
+            } else {
+                match user.r#type.as_str() {
+                    "HUMAN" => SenderKind::Human,
+                    "BOT" => SenderKind::Bot,
+                    _ => SenderKind::Unknown,
+                }
+            },
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListSpacesResponse {
@@ -329,19 +465,7 @@ impl From<MessageDto> for Message {
         Self {
             id: MessageId(value.name),
             thread_id: value.thread.map(|thread| ThreadId(thread.name)),
-            sender: value.sender.map(|sender| Sender {
-                resource_name: sender.name,
-                display_name: (!sender.display_name.is_empty()).then_some(sender.display_name),
-                kind: if sender.is_anonymous {
-                    SenderKind::Anonymous
-                } else {
-                    match sender.r#type.as_str() {
-                        "HUMAN" => SenderKind::Human,
-                        "BOT" => SenderKind::Bot,
-                        _ => SenderKind::Unknown,
-                    }
-                },
-            }),
+            sender: value.sender.map(Into::into),
             text: value.text,
             create_time: value.create_time,
             unsupported_content: !value.cards_v2.is_empty() || !value.attachment.is_empty(),
@@ -443,6 +567,38 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, ChatError::Malformed);
+    }
+
+    #[tokio::test]
+    async fn blank_dm_title_is_inferred_from_other_membership_before_publish() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"memberships":[{"member":{"name":"users/me","displayName":"Me","type":"HUMAN"}},{"member":{"name":"users/other","displayName":"Other Person","type":"HUMAN"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let chat = ChatClient::with_base_url(Url::parse(&format!("http://{address}/")).unwrap());
+        let people = crate::people::PeopleClient::with_test_current_user("people/me");
+        let mut spaces = vec![Space {
+            id: SpaceId("spaces/dm".to_string()),
+            display_name: String::new(),
+            kind: SpaceKind::DirectMessage,
+        }];
+        chat.infer_direct_message_titles(
+            &Zeroizing::new("synthetic-access".to_string()),
+            &mut spaces,
+            &people,
+            None,
+        )
+        .await;
+        assert_eq!(spaces[0].display_name, "Other Person");
     }
 
     #[tokio::test]

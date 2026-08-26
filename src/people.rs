@@ -27,7 +27,14 @@ pub struct PeopleClient {
     http: reqwest::Client,
     base_url: Url,
     directory: tokio::sync::Mutex<Option<Arc<BTreeMap<String, String>>>>,
+    current_user: tokio::sync::Mutex<Option<Arc<CurrentUser>>>,
     contacts_enabled: bool,
+}
+
+#[derive(Debug)]
+struct CurrentUser {
+    resource_names: BTreeSet<String>,
+    display_name: Option<String>,
 }
 
 impl PeopleClient {
@@ -41,6 +48,7 @@ impl PeopleClient {
                 .expect("static HTTP configuration should be valid"),
             base_url: Url::parse(PEOPLE_API).expect("static People API URL should be valid"),
             directory: tokio::sync::Mutex::new(None),
+            current_user: tokio::sync::Mutex::new(None),
             contacts_enabled: true,
         }
     }
@@ -51,6 +59,7 @@ impl PeopleClient {
             http: reqwest::Client::new(),
             base_url,
             directory: tokio::sync::Mutex::new(Some(Arc::new(BTreeMap::new()))),
+            current_user: tokio::sync::Mutex::new(None),
             contacts_enabled: false,
         }
     }
@@ -61,8 +70,105 @@ impl PeopleClient {
             http: reqwest::Client::new(),
             base_url,
             directory: tokio::sync::Mutex::new(None),
+            current_user: tokio::sync::Mutex::new(None),
             contacts_enabled: false,
         }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_test_current_user(resource_name: &str) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base_url: Url::parse(PEOPLE_API).expect("static People API URL should be valid"),
+            directory: tokio::sync::Mutex::new(Some(Arc::new(BTreeMap::new()))),
+            current_user: tokio::sync::Mutex::new(Some(Arc::new(CurrentUser {
+                resource_names: BTreeSet::from([resource_name.to_string()]),
+                display_name: Some("Me".to_string()),
+            }))),
+            contacts_enabled: false,
+        }
+    }
+
+    pub async fn current_user(
+        &self,
+        access_token: &Zeroizing<String>,
+    ) -> Result<(BTreeSet<String>, Option<String>), PeopleError> {
+        let mut cache = self.current_user.lock().await;
+        if let Some(user) = cache.as_ref() {
+            return Ok((user.resource_names.clone(), user.display_name.clone()));
+        }
+        let (mut resource_names, mut display_name) = self.userinfo_identity(access_token).await?;
+        if let Ok((people_names, people_display_name)) = self.current_person(access_token).await {
+            resource_names.extend(people_names);
+            if display_name.is_none() {
+                display_name = people_display_name;
+            }
+        }
+        *cache = Some(Arc::new(CurrentUser {
+            resource_names: resource_names.clone(),
+            display_name: display_name.clone(),
+        }));
+        drop(cache);
+        Ok((resource_names, display_name))
+    }
+
+    async fn userinfo_identity(
+        &self,
+        access_token: &Zeroizing<String>,
+    ) -> Result<(BTreeSet<String>, Option<String>), PeopleError> {
+        #[derive(Deserialize)]
+        struct UserInfo {
+            sub: String,
+            name: Option<String>,
+        }
+        let response = self
+            .http
+            .get("https://openidconnect.googleapis.com/v1/userinfo")
+            .bearer_auth(access_token.as_str())
+            .send()
+            .await
+            .map_err(|_| PeopleError::Transport)?;
+        match response.status() {
+            status if status.is_success() => {}
+            StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
+            StatusCode::FORBIDDEN => return Err(PeopleError::Forbidden),
+            _ => return Err(PeopleError::Transport),
+        }
+        let info: UserInfo = response.json().await.map_err(|_| PeopleError::Malformed)?;
+        Ok((BTreeSet::from([format!("people/{}", info.sub)]), info.name))
+    }
+
+    async fn current_person(
+        &self,
+        access_token: &Zeroizing<String>,
+    ) -> Result<(BTreeSet<String>, Option<String>), PeopleError> {
+        let mut url = Url::parse(&format!("{}people/me", self.base_url.as_str()))
+            .map_err(|_| PeopleError::Malformed)?;
+        url.query_pairs_mut()
+            .append_pair("personFields", "names,metadata");
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token.as_str())
+            .send()
+            .await
+            .map_err(|_| PeopleError::Transport)?;
+        match response.status() {
+            status if status.is_success() => {}
+            StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
+            StatusCode::FORBIDDEN => return Err(PeopleError::Forbidden),
+            _ => return Err(PeopleError::Transport),
+        }
+        let person: PersonDto = response.json().await.map_err(|_| PeopleError::Malformed)?;
+        let display_name = primary_display_name(&person.names);
+        let mut resource_names = BTreeSet::from([person.resource_name]);
+        for source in person.metadata.sources {
+            if !source.id.is_empty() {
+                resource_names.insert(format!("people/{}", source.id));
+            }
+        }
+        Ok((resource_names, display_name))
     }
 
     pub async fn resolve_message_senders(
@@ -70,9 +176,33 @@ impl PeopleClient {
         access_token: &Zeroizing<String>,
         messages: &mut [Message],
     ) -> Result<(), PeopleError> {
-        let resource_names = messages
+        let mut senders = messages
             .iter()
-            .filter_map(|message| message.sender.as_ref())
+            .filter_map(|message| message.sender.clone())
+            .collect::<Vec<_>>();
+        self.resolve_senders(access_token, &mut senders).await?;
+        let resolved = senders
+            .into_iter()
+            .map(|sender| (sender.resource_name.clone(), sender))
+            .collect::<BTreeMap<_, _>>();
+        for message in messages {
+            if let Some(sender) = message.sender.as_mut()
+                && let Some(value) = resolved.get(&sender.resource_name)
+            {
+                sender.display_name.clone_from(&value.display_name);
+                sender.kind = value.kind;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn resolve_senders(
+        &self,
+        access_token: &Zeroizing<String>,
+        senders: &mut [crate::model::Sender],
+    ) -> Result<(), PeopleError> {
+        let resource_names = senders
+            .iter()
             .filter(|sender| {
                 sender.display_name.is_none()
                     && matches!(sender.kind, SenderKind::Human | SenderKind::Unknown)
@@ -80,19 +210,13 @@ impl PeopleClient {
             .filter_map(|sender| chat_user_to_person(&sender.resource_name))
             .collect::<BTreeSet<_>>();
         if sender_diagnostics_enabled() {
-            let total_senders = messages
+            let missing_names = senders
                 .iter()
-                .filter(|message| message.sender.is_some())
-                .count();
-            let missing_names = messages
-                .iter()
-                .filter_map(|message| message.sender.as_ref())
                 .filter(|sender| sender.display_name.is_none())
                 .count();
             eprintln!(
-                "gchatui sender diagnostics: messages={} senders={} missing_names={} eligible={}",
-                messages.len(),
-                total_senders,
+                "gchatui sender diagnostics: senders={} missing_names={} eligible={}",
+                senders.len(),
                 missing_names,
                 resource_names.len()
             );
@@ -120,9 +244,8 @@ impl PeopleClient {
         }
         let directory = Arc::new(identity_index);
         let mut unresolved = BTreeSet::new();
-        for message in messages.iter_mut() {
-            if let Some(sender) = message.sender.as_mut()
-                && sender.display_name.is_none()
+        for sender in senders.iter_mut() {
+            if sender.display_name.is_none()
                 && let Some(person_name) = chat_user_to_person(&sender.resource_name)
             {
                 if let Some(display_name) = directory.get(&person_name) {
@@ -141,9 +264,8 @@ impl PeopleClient {
         {
             resolved.extend(self.resolve_batch(access_token, batch).await?);
         }
-        for message in messages {
-            if let Some(sender) = message.sender.as_mut()
-                && sender.display_name.is_none()
+        for sender in senders {
+            if sender.display_name.is_none()
                 && let Some(person_name) = chat_user_to_person(&sender.resource_name)
                 && let Some(display_name) = resolved.get(&person_name)
             {
