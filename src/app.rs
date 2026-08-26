@@ -355,8 +355,13 @@ impl App {
             == Some(Action::Activate);
         self.focused_thread_activity = Some(index);
         if activated {
-            self.conversation_view
-                .set_vertical_scroll(self.thread_activity_links[index].target_line);
+            let area = conversation_content_area(self.conversation_pane.area);
+            let target = wrapped_row_for_source_line(
+                self.conversation_lines.as_slice(),
+                area.width,
+                self.thread_activity_links[index].target_line,
+            );
+            self.conversation_view.set_vertical_scroll(target);
             self.follow_conversation_bottom = false;
         }
         Some(Update::redraw())
@@ -479,15 +484,15 @@ impl App {
             }
             return Update::none();
         }
+        if let Some(update) = self.handle_thread_activity_event(&event) {
+            return update;
+        }
         if let Event::Key(stroke) = event
             && let Some(action) = self.bindings.action_for(stroke)
         {
             return self.apply_action(action);
         }
 
-        if let Some(update) = self.handle_thread_activity_event(&event) {
-            return update;
-        }
         if let Some(update) = self.handle_direct_wheel(&event) {
             return update;
         }
@@ -950,21 +955,37 @@ fn sender_label(sender: &crate::model::Sender) -> String {
     }
 }
 
+fn wrapped_row_for_source_line(lines: &[Line], width: u16, source_line: usize) -> usize {
+    lines
+        .iter()
+        .take(source_line)
+        .map(|line| line.wrap_word(usize::from(width.max(1))).len().max(1))
+        .sum()
+}
+
 fn thread_activity_area(
     link: &ThreadActivityLink,
+    lines: &[Line],
     view: &TextView<'_>,
     state: &TextViewState,
     area: Rect,
 ) -> Option<Rect> {
     let layout = view.layout(area, state);
-    let relative = link.source_line.checked_sub(layout.vertical_scroll)?;
+    let source_row = wrapped_row_for_source_line(lines, area.width, link.source_line);
+    let relative = source_row.checked_sub(layout.vertical_scroll)?;
     let row = u16::try_from(relative).ok()?;
     (row < area.height).then_some(Rect::new(area.x, area.y.saturating_add(row), area.width, 1))
 }
 
 fn render_thread_activity_hits(app: &App, view: &TextView<'_>, area: Rect, frame: &mut Frame<'_>) {
     for link in app.thread_activity_links.iter() {
-        let Some(hit_area) = thread_activity_area(link, view, &app.conversation_view, area) else {
+        let Some(hit_area) = thread_activity_area(
+            link,
+            app.conversation_lines.as_slice(),
+            view,
+            &app.conversation_view,
+            area,
+        ) else {
             continue;
         };
         frame.push_hit(
@@ -1532,11 +1553,18 @@ fn interactive_pane() -> Pane<'static> {
 }
 
 #[cfg(test)]
-fn render_to_buffer(app: &mut App, area: Rect) -> Buffer {
+fn render_to_buffer_and_hits(app: &mut App, area: Rect) -> (Buffer, HitMap) {
     let mut buffer = Buffer::empty(area);
     let mut frame = Frame::new(&mut buffer);
     render(app, &mut frame);
-    buffer
+    let hits = frame.hits().clone();
+    drop(frame);
+    (buffer, hits)
+}
+
+#[cfg(test)]
+fn render_to_buffer(app: &mut App, area: Rect) -> Buffer {
+    render_to_buffer_and_hits(app, area).0
 }
 
 fn hints(app: &App) -> Vec<(String, &'static str)> {
@@ -1672,6 +1700,66 @@ mod tests {
             right_point,
         )));
         assert_eq!(app.spaces.vertical_scroll(), left_before);
+    }
+
+    #[test]
+    fn thread_activity_click_jumps_to_wrapped_root() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.messages = vec![
+            crate::model::Message {
+                id: crate::model::MessageId("root".to_string()),
+                thread_id: Some(crate::model::ThreadId("thread".to_string())),
+                sender: None,
+                text: "A root message with enough words to wrap across multiple terminal rows when rendered in a narrow conversation pane".to_string(),
+                create_time: "09:00".to_string(),
+                is_thread_reply: false,
+                unsupported_content: false,
+            },
+            crate::model::Message {
+                id: crate::model::MessageId("ordinary".to_string()),
+                thread_id: None,
+                sender: None,
+                text: "ordinary".to_string(),
+                create_time: "09:05".to_string(),
+                is_thread_reply: false,
+                unsupported_content: false,
+            },
+            crate::model::Message {
+                id: crate::model::MessageId("reply".to_string()),
+                thread_id: Some(crate::model::ThreadId("thread".to_string())),
+                sender: None,
+                text: "reply".to_string(),
+                create_time: "09:10".to_string(),
+                is_thread_reply: true,
+                unsupported_content: false,
+            },
+        ];
+        app.product.phase = Phase::Ready;
+        app.rebuild_projections();
+        app.conversation_view.set_vertical_scroll(usize::MAX);
+        let (_buffer, hits) = render_to_buffer_and_hits(&mut app, Rect::new(0, 0, 70, 16));
+        app.interactions.commit_scene(hits, None);
+        let link = app.thread_activity_links.first().unwrap();
+        let view = TextView::new(app.conversation_lines.as_slice());
+        let area = conversation_content_area(app.conversation_pane.area);
+        let hit_area = thread_activity_area(
+            link,
+            app.conversation_lines.as_slice(),
+            &view,
+            &app.conversation_view,
+            area,
+        )
+        .unwrap();
+        let point = Point::new(hit_area.x.saturating_add(2), hit_area.y);
+        let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
+            MouseEventKind::Down(MouseButton::Left),
+            point,
+        )));
+        let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
+            MouseEventKind::Up(MouseButton::Left),
+            point,
+        )));
+        assert_eq!(app.conversation_view.vertical_scroll(), 0);
     }
 
     #[test]

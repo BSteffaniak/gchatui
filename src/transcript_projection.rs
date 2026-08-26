@@ -272,6 +272,7 @@ mod tests {
         assert!(text.contains("added 2 replies to a thread"));
         assert!(text.contains("added 1 reply to a thread"));
         assert_eq!(projection.links.len(), 2);
+        assert!(projection.links.iter().all(|link| link.target_line == 0));
         assert!(!text.contains("thread-activity-"));
     }
 
