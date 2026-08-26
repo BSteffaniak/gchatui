@@ -68,6 +68,7 @@ pub struct App {
     conversation_view: TextViewState,
     help_button: ButtonState,
     focused_pane: FocusedPane,
+    follow_conversation_bottom: bool,
     help_visible: bool,
 }
 
@@ -91,6 +92,7 @@ impl App {
             conversation_view: TextViewState::new(),
             help_button: ButtonState::new(),
             focused_pane: FocusedPane::Spaces,
+            follow_conversation_bottom: false,
             help_visible: false,
         }
     }
@@ -141,6 +143,14 @@ impl App {
     }
 
     fn handle_space_event(&mut self, event: &Event) -> Option<Update<AppMessage>> {
+        if let Event::Mouse(mouse) = event
+            && !self.space_pane.area.contains(mouse.position)
+        {
+            return None;
+        }
+        if matches!(event, Event::Key(_)) && self.focused_pane != FocusedPane::Spaces {
+            return None;
+        }
         let spaces = displayed_spaces(self);
         let mut outcome = spaces_list(&spaces).handle_event(
             space_list_area(self.space_pane.area),
@@ -192,11 +202,20 @@ impl App {
         }
 
         let conversation_lines = conversation_lines(self);
-        let conversation_outcome = TextView::new(&conversation_lines).handle_event(
-            conversation_content_area(self.conversation_pane.area),
-            &mut self.conversation_view,
-            &event,
-        );
+        let conversation_outcome = if let Event::Mouse(mouse) = event
+            && !self.conversation_pane.area.contains(mouse.position)
+        {
+            TextViewOutcome::Ignored
+        } else {
+            TextView::new(&conversation_lines).handle_event(
+                conversation_content_area(self.conversation_pane.area),
+                &mut self.conversation_view,
+                &event,
+            )
+        };
+        if matches!(conversation_outcome, TextViewOutcome::Scrolled { .. }) {
+            self.follow_conversation_bottom = false;
+        }
         if matches!(
             conversation_outcome,
             TextViewOutcome::Redraw | TextViewOutcome::Scrolled { .. }
@@ -253,6 +272,46 @@ impl App {
         }
     }
 
+    fn apply_scroll_action(&mut self, action: Action) {
+        match self.focused_pane {
+            FocusedPane::Spaces => {
+                let area = space_list_area(self.space_pane.area);
+                let amount = usize::from(area.height.max(1));
+                let next = match action {
+                    Action::PageDown => self.spaces.vertical_scroll().saturating_add(amount),
+                    Action::PageUp => self.spaces.vertical_scroll().saturating_sub(amount),
+                    Action::GoTop => 0,
+                    Action::GoBottom => {
+                        spaces_list(&displayed_spaces(self)).max_vertical_scroll(area)
+                    }
+                    _ => self.spaces.vertical_scroll(),
+                };
+                self.spaces.set_vertical_scroll(next);
+            }
+            FocusedPane::Conversation => {
+                let lines = conversation_lines(self);
+                let area = conversation_content_area(self.conversation_pane.area);
+                let view = TextView::new(&lines);
+                let amount = usize::from(area.height.max(1));
+                let next = match action {
+                    Action::PageDown => self
+                        .conversation_view
+                        .vertical_scroll()
+                        .saturating_add(amount),
+                    Action::PageUp => self
+                        .conversation_view
+                        .vertical_scroll()
+                        .saturating_sub(amount),
+                    Action::GoTop => 0,
+                    Action::GoBottom => view.max_vertical_scroll(area),
+                    _ => self.conversation_view.vertical_scroll(),
+                };
+                self.conversation_view.set_vertical_scroll(next);
+                self.follow_conversation_bottom = matches!(action, Action::GoBottom);
+            }
+        }
+    }
+
     fn apply_action(&mut self, action: Action) -> Update<AppMessage> {
         match action {
             Action::Quit => Update {
@@ -292,15 +351,36 @@ impl App {
                 self.space_pane.interaction.focused = self.focused_pane == FocusedPane::Spaces;
                 self.conversation_pane.interaction.focused =
                     self.focused_pane == FocusedPane::Conversation;
+                self.conversation_view
+                    .set_focused(self.focused_pane == FocusedPane::Conversation);
                 Update::reset()
             }
+            Action::MoveDown if self.focused_pane == FocusedPane::Conversation => {
+                self.follow_conversation_bottom = false;
+                self.conversation_view.set_vertical_scroll(
+                    self.conversation_view.vertical_scroll().saturating_add(1),
+                );
+                Update::redraw()
+            }
+            Action::MoveUp if self.focused_pane == FocusedPane::Conversation => {
+                self.follow_conversation_bottom = false;
+                self.conversation_view.set_vertical_scroll(
+                    self.conversation_view.vertical_scroll().saturating_sub(1),
+                );
+                Update::redraw()
+            }
+            Action::PageDown | Action::PageUp | Action::GoTop | Action::GoBottom => {
+                self.apply_scroll_action(action);
+                Update::redraw()
+            }
             Action::MoveDown => {
+                let item_count = displayed_spaces(self).len();
                 let next = self
                     .spaces
                     .focused()
                     .unwrap_or(0)
                     .saturating_add(1)
-                    .min(synthetic_spaces().len().saturating_sub(1));
+                    .min(item_count.saturating_sub(1));
                 self.spaces.set_focused(Some(next));
                 self.spaces.set_selected(Some(next));
                 Update::reset()
@@ -311,7 +391,6 @@ impl App {
                 self.spaces.set_selected(Some(previous));
                 Update::reset()
             }
-            _ => Update::none(),
         }
     }
 }
@@ -328,7 +407,11 @@ impl Program for App {
             RuntimeEvent::Terminal(event) => Ok(self.update_terminal(event)),
             RuntimeEvent::Message(AppMessage::Start) => Ok(startup_update(self)),
             RuntimeEvent::Message(AppMessage::Product(message)) => {
+                let messages_loaded = matches!(message, ProductMessage::MessagesLoaded { .. });
                 self.product.update(message);
+                if messages_loaded && matches!(self.product.phase, Phase::Ready | Phase::Empty) {
+                    self.follow_conversation_bottom = true;
+                }
                 sync_space_selection(self);
                 Ok(Update::reset())
             }
@@ -359,7 +442,9 @@ pub async fn run(bindings: KeybindingRegistry, access_token: Option<Secret>) -> 
             app,
             presenter,
             RuntimeConfig {
-                frame_interval: None,
+                frame_interval: Some(std::time::Duration::from_millis(16)),
+                max_active_commands: 4,
+                max_queued_commands: 8,
                 ..RuntimeConfig::default()
             },
         );
@@ -564,17 +649,18 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     spaces_list(&spaces).render(space_list_area(spaces_area), &app.spaces, frame);
 
     let conversation = conversation_lines(app);
-    TextView::new(&conversation)
-        .styles(TextViewStyles {
-            text: Style::new().fg(TEXT).bg(SURFACE),
-            empty: Style::new().fg(MUTED).bg(SURFACE),
-            background: Style::new().bg(SURFACE),
-        })
-        .render(
-            conversation_content_area(conversation_area),
-            &app.conversation_view,
-            frame,
-        );
+    let conversation_area = conversation_content_area(conversation_area);
+    let conversation_view = TextView::new(&conversation).styles(TextViewStyles {
+        text: Style::new().fg(TEXT).bg(SURFACE),
+        empty: Style::new().fg(MUTED).bg(SURFACE),
+        background: Style::new().bg(SURFACE),
+    });
+    if app.follow_conversation_bottom {
+        app.conversation_view
+            .set_vertical_scroll(conversation_view.max_vertical_scroll(conversation_area));
+        app.follow_conversation_bottom = false;
+    }
+    conversation_view.render(conversation_area, &app.conversation_view, frame);
 
     let footer_y = area
         .y
@@ -598,7 +684,7 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
             frame,
         );
     if app.help_visible {
-        render_help(app, frame, conversation_area);
+        render_help(app, frame, app.conversation_pane.area);
     }
     let status_text = status_text(app);
     let severity = status_severity(app.product.phase);
@@ -948,6 +1034,44 @@ mod tests {
 
     use bmux_tui::event::{MouseButton, MouseEvent, MouseEventKind};
     use bmux_tui::geometry::Point;
+
+    #[test]
+    fn newly_loaded_messages_follow_latest_and_pane_scrolling_is_isolated() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.selected_space = Some("spaces/example".to_string());
+        for index in 0..80 {
+            app.product.messages.push(crate::model::Message {
+                id: crate::model::MessageId(format!("messages/{index}")),
+                thread_id: None,
+                sender: None,
+                text: format!("Synthetic message {index}"),
+                create_time: format!("{index:03}"),
+                unsupported_content: false,
+            });
+        }
+        app.product.phase = Phase::Ready;
+        app.follow_conversation_bottom = true;
+        let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 24));
+        assert!(app.conversation_view.vertical_scroll() > 0);
+        let left_before = app.spaces.vertical_scroll();
+        let right_before = app.conversation_view.vertical_scroll();
+
+        app.focused_pane = FocusedPane::Conversation;
+        let up = "k".parse::<crate::keybind::KeyChord>().unwrap();
+        let _ = app.update_terminal(Event::Key(up.stroke()));
+        assert_eq!(app.spaces.vertical_scroll(), left_before);
+        assert!(app.conversation_view.vertical_scroll() < right_before);
+
+        let right_point = Point::new(
+            app.conversation_pane.area.x.saturating_add(2),
+            app.conversation_pane.area.y.saturating_add(3),
+        );
+        let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
+            MouseEventKind::ScrollUp,
+            right_point,
+        )));
+        assert_eq!(app.spaces.vertical_scroll(), left_before);
+    }
 
     #[test]
     fn conversation_groups_thread_replies() {
