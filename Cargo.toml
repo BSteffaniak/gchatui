@@ -23,11 +23,11 @@ bmux_tui_components = { git = "https://github.com/BSteffaniak/bmux.git", branch 
     "button",
     "key-hint-bar",
     "pane",
-    "scroll-area",
+    "scroll-view",
     "selectable-list",
     "status-bar",
     "text-input-box",
-    "text-view",
+    "virtual-list",
 ] }
 bmux_tui_runtime = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
     "crossterm",

@@ -9,11 +9,20 @@ pub struct ThreadActivityLink {
     pub id: String,
     pub source_line: usize,
     pub target_line: usize,
+    pub source_key: String,
+    pub target_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptItem {
+    pub key: String,
+    pub line: Line,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptProjection {
     pub lines: Vec<Line>,
+    pub items: Vec<TranscriptItem>,
     pub links: Vec<ThreadActivityLink>,
 }
 
@@ -115,6 +124,8 @@ pub fn project(
                 id: format!("thread-activity-{source_line}"),
                 source_line,
                 target_line,
+                source_key: String::new(),
+                target_key: String::new(),
             });
             lines.push(Line::from(""));
             continue;
@@ -124,8 +135,29 @@ pub fn project(
         index += 1;
     }
 
+    finalize_projection(lines, activity_links)
+}
+
+fn finalize_projection(
+    lines: Vec<Line>,
+    mut activity_links: Vec<ThreadActivityLink>,
+) -> TranscriptProjection {
+    let items = lines
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, line)| TranscriptItem {
+            key: format!("transcript-line-{index}"),
+            line,
+        })
+        .collect::<Vec<_>>();
+    for link in &mut activity_links {
+        link.source_key = format!("transcript-line-{}", link.source_line);
+        link.target_key = format!("transcript-line-{}", link.target_line);
+    }
     TranscriptProjection {
         lines,
+        items,
         links: activity_links,
     }
 }

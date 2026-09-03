@@ -1,33 +1,40 @@
+use std::cell::{Cell, RefCell};
 use std::io::{Stdout, stdout};
 use std::sync::Arc;
 
 use anyhow::Result;
 #[cfg(test)]
 use bmux_tui::buffer::Buffer;
+use bmux_tui::component::{Component, Constraints, LayoutCx, LayoutId, LayoutNode, LogicalSize};
 use bmux_tui::crossterm::{CrosstermTerminalGuard, terminal_size};
 use bmux_tui::event::{Event, MouseButton, MouseEventKind};
 use bmux_tui::frame::Frame;
-use bmux_tui::geometry::{Insets, Point, Rect};
+use bmux_tui::geometry::{Insets, Rect, Size};
 use bmux_tui::hit::{HitId, HitMap, HitRegion, HitRole};
 use bmux_tui::interaction::InteractionRouter;
+use bmux_tui::paint::{LocalRect, PaintCx};
 use bmux_tui::prelude::{Color, Line, Modifier, Span, Style};
 use bmux_tui::terminal::Terminal;
-use bmux_tui_components::button::{Button, ButtonOutcome, ButtonState, ButtonStyles};
-use bmux_tui_components::key_hint_bar::{KeyHint, KeyHintBar, KeyHintBarPolicy, KeyHintBarStyles};
-use bmux_tui_components::pane::{
-    Pane, PaneMousePolicy, PaneOutcome, PanePolicy, PaneState, PaneStyles,
+use bmux_tui_components::button::{
+    Button, ButtonComponent, ButtonOutcome, ButtonState, ButtonStyles,
 };
-use bmux_tui_components::scroll_area::ScrollAreaScrollbarMode;
+use bmux_tui_components::key_hint_bar::{
+    KeyHint, KeyHintBarComponent, KeyHintBarPolicy, KeyHintBarStyles,
+};
+use bmux_tui_components::pane::{
+    Pane, PaneComponent, PaneMousePolicy, PaneOutcome, PanePolicy, PaneState, PaneStyles,
+};
+use bmux_tui_components::scrollbar_layout::ScrollbarAxisLayoutMode;
 use bmux_tui_components::selectable_list::{
     SelectableList, SelectableListHighlightPolicy, SelectableListItem, SelectableListOutcome,
     SelectableListPolicy, SelectableListState, SelectableListStyles,
 };
 use bmux_tui_components::status_bar::{
-    StatusBar, StatusBarPolicy, StatusBarStyles, StatusSegment, StatusSeverity,
+    StatusBarComponent, StatusBarPolicy, StatusBarStyles, StatusSegment, StatusSeverity,
 };
-use bmux_tui_components::text_input::TextInputState;
-use bmux_tui_components::text_input_box::{TextInputBox, TextInputBoxOutcome, TextInputBoxPolicy};
-use bmux_tui_components::text_view::{TextView, TextViewOutcome, TextViewState, TextViewStyles};
+use bmux_tui_components::text_input::{TextInputControl, TextInputOutcome, TextInputState};
+use bmux_tui_components::text_input_box::{TextInputBoxComponent, TextInputBoxPolicy};
+use bmux_tui_components::virtual_list::{VirtualList, VirtualListState};
 use bmux_tui_runtime::{
     Command, CommandKey, Lifecycle, Program, Runtime, RuntimeConfig, RuntimeEvent, TerminalInput,
     TerminalPresenter, Update,
@@ -39,7 +46,9 @@ use crate::keybind::{Action, KeybindingRegistry};
 use crate::people::PeopleClient;
 use crate::product::{Effect, Phase, ProductMessage, ProductState};
 use crate::sender_alias::SenderAliases;
-use crate::transcript_projection::{ThreadActivityLink, TranscriptColors, TranscriptProjection};
+use crate::transcript_projection::{
+    ThreadActivityLink, TranscriptColors, TranscriptItem, TranscriptProjection,
+};
 
 const CANVAS: Color = Color::Rgb(10, 14, 24);
 const SURFACE: Color = Color::Rgb(16, 23, 38);
@@ -72,6 +81,7 @@ pub struct App {
     spaces: SelectableListState,
     space_items: Arc<Vec<SelectableListItem>>,
     conversation_lines: Arc<Vec<Line>>,
+    conversation_items: Arc<Vec<TranscriptItem>>,
     thread_activity_links: Arc<Vec<ThreadActivityLink>>,
     focused_thread_activity: Option<usize>,
     product: ProductState,
@@ -81,7 +91,7 @@ pub struct App {
     access_token: Option<Arc<Secret>>,
     space_pane: PaneState,
     conversation_pane: PaneState,
-    conversation_view: TextViewState,
+    conversation_view: VirtualListState<String>,
     help_button: ButtonState,
     alias_picker: Option<AliasPicker>,
     alias_editor: Option<AliasEditor>,
@@ -121,6 +131,10 @@ impl App {
             spaces: SelectableListState::new(Some(0)),
             space_items: Arc::new(Vec::new()),
             conversation_lines: Arc::new(vec![Line::from("Select a space to read messages")]),
+            conversation_items: Arc::new(vec![TranscriptItem {
+                key: "transcript-line-0".to_string(),
+                line: Line::from("Select a space to read messages"),
+            }]),
             thread_activity_links: Arc::new(Vec::new()),
             focused_thread_activity: None,
             product: ProductState::default(),
@@ -130,7 +144,7 @@ impl App {
             access_token: None,
             space_pane: PaneState::new(Rect::new(0, 0, 0, 0)),
             conversation_pane: PaneState::new(Rect::new(0, 0, 0, 0)),
-            conversation_view: TextViewState::new(),
+            conversation_view: VirtualListState::new(0),
             help_button: ButtonState::new(),
             alias_picker: None,
             alias_editor: None,
@@ -144,6 +158,7 @@ impl App {
         self.space_items = Arc::new(project_spaces(&self.product));
         let projection = project_conversation(&self.product);
         self.conversation_lines = Arc::new(projection.lines);
+        self.conversation_items = Arc::new(projection.items);
         self.thread_activity_links = Arc::new(projection.links);
         self.focused_thread_activity = None;
     }
@@ -252,12 +267,11 @@ impl App {
         let content = alias_editor_content_area(self.conversation_pane.area);
         let input_area = Rect::new(content.x, content.y, content.width, 1);
         let editor = self.alias_editor.as_mut().expect("alias editor checked");
-        let input =
-            TextInputBox::new(bmux_tui_components::text_input::TextInputPolicy::chat_composer())
-                .policy(TextInputBoxPolicy::field().focused(true))
-                .placeholder("Local display name");
-        match input.handle_event(input_area, &mut editor.input, event) {
-            TextInputBoxOutcome::Submitted => {
+        let _ = input_area;
+        let input_policy = bmux_tui_components::text_input::TextInputPolicy::chat_composer();
+        let input = TextInputControl::new(&input_policy);
+        match input.handle_event(&mut editor.input, event) {
+            TextInputOutcome::Submitted => {
                 let value = editor.input.buffer().text().to_string();
                 let resource_name = editor.resource_name.clone();
                 match self
@@ -275,10 +289,10 @@ impl App {
                 }
                 Update::reset()
             }
-            TextInputBoxOutcome::Edited | TextInputBoxOutcome::Redraw => Update::redraw(),
-            TextInputBoxOutcome::Ignored
-            | TextInputBoxOutcome::EdgeUp
-            | TextInputBoxOutcome::EdgeDown => Update::none(),
+            TextInputOutcome::Edited | TextInputOutcome::Redraw => Update::redraw(),
+            TextInputOutcome::Ignored | TextInputOutcome::EdgeUp | TextInputOutcome::EdgeDown => {
+                Update::none()
+            }
         }
     }
 
@@ -357,12 +371,9 @@ impl App {
         self.focused_thread_activity = Some(index);
         if activated {
             let area = conversation_content_area(self.conversation_pane.area);
-            let target = wrapped_row_for_source_line(
-                self.conversation_lines.as_slice(),
-                area.width,
-                self.thread_activity_links[index].target_line,
-            );
-            self.conversation_view.set_vertical_scroll(target);
+            let target_key = self.thread_activity_links[index].target_key.clone();
+            self.conversation_view
+                .scroll_to_key(&target_key, usize::from(area.height));
             self.follow_conversation_bottom = false;
         }
         Some(Update::redraw())
@@ -384,12 +395,12 @@ impl App {
         };
         if self.conversation_pane.area.contains(mouse.position) {
             let current =
-                i32::try_from(self.conversation_view.vertical_scroll()).unwrap_or(i32::MAX);
+                i32::try_from(self.conversation_view.scroll.vertical_offset()).unwrap_or(i32::MAX);
             let next = usize::try_from(current.saturating_add(delta).max(0)).unwrap_or(usize::MAX);
-            if next == self.conversation_view.vertical_scroll() {
+            if next == self.conversation_view.scroll.vertical_offset() {
                 return Some(Update::none());
             }
-            self.conversation_view.set_vertical_scroll(next);
+            self.conversation_view.scroll.set_vertical_offset(next);
             self.follow_conversation_bottom = false;
             return Some(Update::redraw());
         }
@@ -501,28 +512,6 @@ impl App {
             return update;
         }
 
-        let conversation_lines = Arc::clone(&self.conversation_lines);
-        let conversation_outcome = if let Event::Mouse(mouse) = event
-            && !self.conversation_pane.area.contains(mouse.position)
-        {
-            TextViewOutcome::Ignored
-        } else {
-            TextView::new(conversation_lines.as_slice()).handle_event(
-                conversation_content_area(self.conversation_pane.area),
-                &mut self.conversation_view,
-                &event,
-            )
-        };
-        if matches!(conversation_outcome, TextViewOutcome::Scrolled { .. }) {
-            self.follow_conversation_bottom = false;
-        }
-        if matches!(
-            conversation_outcome,
-            TextViewOutcome::Redraw | TextViewOutcome::Scrolled { .. }
-        ) {
-            return Update::reset();
-        }
-
         let help = Button::new("Help");
         let help_outcome = help.handle_event(
             help_button_area(footer_area(self)),
@@ -589,24 +578,30 @@ impl App {
                 self.spaces.set_vertical_scroll(next);
             }
             FocusedPane::Conversation => {
-                let lines = Arc::clone(&self.conversation_lines);
                 let area = conversation_content_area(self.conversation_pane.area);
-                let view = TextView::new(lines.as_slice());
-                let amount = usize::from(area.height.max(1));
-                let next = match action {
-                    Action::PageDown => self
-                        .conversation_view
-                        .vertical_scroll()
-                        .saturating_add(amount),
-                    Action::PageUp => self
-                        .conversation_view
-                        .vertical_scroll()
-                        .saturating_sub(amount),
-                    Action::GoTop => 0,
-                    Action::GoBottom => view.max_vertical_scroll(area),
-                    _ => self.conversation_view.vertical_scroll(),
-                };
-                self.conversation_view.set_vertical_scroll(next);
+                let amount = isize::try_from(area.height.max(1)).unwrap_or(isize::MAX);
+                match action {
+                    Action::PageDown => self.conversation_view.scroll.set_vertical_offset(
+                        self.conversation_view
+                            .scroll
+                            .vertical_offset()
+                            .saturating_add_signed(amount),
+                    ),
+                    Action::PageUp => self.conversation_view.scroll.set_vertical_offset(
+                        self.conversation_view
+                            .scroll
+                            .vertical_offset()
+                            .saturating_add_signed(-amount),
+                    ),
+                    Action::GoTop => self.conversation_view.scroll.set_vertical_offset(0),
+                    Action::GoBottom => {
+                        self.conversation_view
+                            .scroll
+                            .set_vertical_offset(usize::MAX);
+                        self.conversation_view.scroll.set_follow_bottom(true);
+                    }
+                    _ => {}
+                }
                 self.follow_conversation_bottom = matches!(action, Action::GoBottom);
             }
         }
@@ -653,21 +648,25 @@ impl App {
                 self.space_pane.interaction.focused = self.focused_pane == FocusedPane::Spaces;
                 self.conversation_pane.interaction.focused =
                     self.focused_pane == FocusedPane::Conversation;
-                self.conversation_view
-                    .set_focused(self.focused_pane == FocusedPane::Conversation);
                 Update::reset()
             }
             Action::MoveDown if self.focused_pane == FocusedPane::Conversation => {
                 self.follow_conversation_bottom = false;
-                self.conversation_view.set_vertical_scroll(
-                    self.conversation_view.vertical_scroll().saturating_add(1),
+                self.conversation_view.scroll.set_vertical_offset(
+                    self.conversation_view
+                        .scroll
+                        .vertical_offset()
+                        .saturating_add(1),
                 );
                 Update::redraw()
             }
             Action::MoveUp if self.focused_pane == FocusedPane::Conversation => {
                 self.follow_conversation_bottom = false;
-                self.conversation_view.set_vertical_scroll(
-                    self.conversation_view.vertical_scroll().saturating_sub(1),
+                self.conversation_view.scroll.set_vertical_offset(
+                    self.conversation_view
+                        .scroll
+                        .vertical_offset()
+                        .saturating_sub(1),
                 );
                 Update::redraw()
             }
@@ -913,14 +912,19 @@ fn project_spaces(product: &ProductState) -> Vec<SelectableListItem> {
 
 fn project_conversation(product: &ProductState) -> TranscriptProjection {
     if product.messages.is_empty() {
+        let line = Line::from(match product.phase {
+            Phase::LoadingMessages | Phase::Refreshing => "Loading messages…",
+            Phase::Empty => "No messages",
+            Phase::RecoverableError => "Unable to load messages. Refresh to retry.",
+            Phase::Reauthentication => "Authorization expired. Sign in again.",
+            _ => "Select a space to read messages",
+        });
         return TranscriptProjection {
-            lines: vec![Line::from(match product.phase {
-                Phase::LoadingMessages | Phase::Refreshing => "Loading messages…",
-                Phase::Empty => "No messages",
-                Phase::RecoverableError => "Unable to load messages. Refresh to retry.",
-                Phase::Reauthentication => "Authorization expired. Sign in again.",
-                _ => "Select a space to read messages",
-            })],
+            lines: vec![line.clone()],
+            items: vec![TranscriptItem {
+                key: "transcript-line-0".to_string(),
+                line,
+            }],
             links: Vec::new(),
         };
     }
@@ -957,37 +961,45 @@ fn sender_label(sender: &crate::model::Sender) -> String {
     }
 }
 
-fn wrapped_row_for_source_line(lines: &[Line], width: u16, source_line: usize) -> usize {
-    lines
+fn transcript_list(items: &[TranscriptItem]) -> VirtualList<'_, String> {
+    items
         .iter()
-        .take(source_line)
-        .map(|line| line.wrap_word(usize::from(width.max(1))).len().max(1))
-        .sum()
+        .fold(VirtualList::new("conversation"), |list, item| {
+            let background = if item
+                .line
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(MESSAGE_BG))
+            {
+                MESSAGE_BG
+            } else {
+                SURFACE
+            };
+            list.item(
+                item.key.clone(),
+                0,
+                bmux_tui::prelude::TextBlock::new(bmux_tui::prelude::Text::from_lines([item
+                    .line
+                    .clone()]))
+                .style(Style::new().fg(TEXT).bg(background)),
+            )
+        })
 }
 
 fn thread_activity_area(
     link: &ThreadActivityLink,
-    lines: &[Line],
-    view: &TextView<'_>,
-    state: &TextViewState,
+    state: &VirtualListState<String>,
     area: Rect,
 ) -> Option<Rect> {
-    let layout = view.layout(area, state);
-    let source_row = wrapped_row_for_source_line(lines, area.width, link.source_line);
-    let relative = source_row.checked_sub(layout.vertical_scroll)?;
+    let source = state.item_offset(&link.source_key)?;
+    let relative = source.checked_sub(state.scroll.vertical_offset())?;
     let row = u16::try_from(relative).ok()?;
     (row < area.height).then_some(Rect::new(area.x, area.y.saturating_add(row), area.width, 1))
 }
 
-fn render_thread_activity_hits(app: &App, view: &TextView<'_>, area: Rect, frame: &mut Frame<'_>) {
+fn render_thread_activity_hits(app: &App, area: Rect, frame: &mut Frame<'_>) {
     for link in app.thread_activity_links.iter() {
-        let Some(hit_area) = thread_activity_area(
-            link,
-            app.conversation_lines.as_slice(),
-            view,
-            &app.conversation_view,
-            area,
-        ) else {
+        let Some(hit_area) = thread_activity_area(link, &app.conversation_view, area) else {
             continue;
         };
         frame.push_hit(
@@ -999,14 +1011,42 @@ fn render_thread_activity_hits(app: &App, view: &TextView<'_>, area: Rect, frame
     }
 }
 
+struct EmptyComponent;
+
+impl Component for EmptyComponent {
+    fn layout(&self, constraints: Constraints, cx: &mut LayoutCx) -> LayoutNode {
+        cx.record_measurement();
+        LayoutNode::leaf(
+            LayoutId::new("empty"),
+            constraints.constrain(LogicalSize::new(0, 0)),
+        )
+    }
+
+    fn paint(&self, _layout: &LayoutNode, _cx: &mut PaintCx<'_, '_>) {}
+}
+
+fn paint_component(frame: &mut Frame<'_>, area: Rect, component: &impl Component) {
+    if area.is_empty() {
+        return;
+    }
+    let layout = component.layout(
+        Constraints::tight(Size::new(area.width, area.height)),
+        &mut LayoutCx::new(),
+    );
+    PaintCx::new(frame).with_child(
+        i32::from(area.x),
+        i64::from(area.y),
+        LocalRect::new(0, 0, area.width, area.height),
+        |cx| component.paint(&layout, cx),
+    );
+}
+
 #[allow(clippy::too_many_lines)]
 fn render(app: &mut App, frame: &mut Frame<'_>) {
     let area = frame.area();
-    frame
-        .buffer_mut()
-        .fill(area, " ", Style::new().bg(CANVAS).fg(TEXT));
+    frame.fill(area, " ", Style::new().bg(CANVAS).fg(TEXT));
     if area.width < 20 || area.height < 6 {
-        frame.buffer_mut().write_line(
+        frame.write_line(
             Rect::new(area.x, area.y, area.width, 1),
             &Line::from("Terminal is too small"),
         );
@@ -1035,32 +1075,58 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     app.conversation_pane.area = conversation_area;
 
     let pane = interactive_pane();
-    pane.clone()
-        .title(Line::from_spans(vec![
-            Span::styled(
-                "  CONVERSATIONS",
-                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", app.product.spaces.len()),
-                Style::new().fg(MUTED),
-            ),
-        ]))
-        .render_with_id("spaces-pane", &app.space_pane, frame);
-    pane.title(Line::from_spans(vec![
+    let spaces_pane = pane.clone().title(Line::from_spans(vec![
+        Span::styled(
+            "  CONVERSATIONS",
+            Style::new()
+                .fg(ACCENT)
+                .bg(SURFACE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}", app.product.spaces.len()),
+            Style::new().fg(MUTED).bg(SURFACE),
+        ),
+        Span::styled(" ".repeat(100), Style::new().bg(SURFACE)),
+    ]));
+    paint_component(
+        frame,
+        spaces_area,
+        &PaneComponent::new(
+            "spaces-pane",
+            spaces_pane,
+            &Cell::new(app.space_pane),
+            EmptyComponent,
+        ),
+    );
+    let conversation_pane = pane.title(Line::from_spans(vec![
         Span::styled(
             "  MESSAGES",
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(ACCENT)
+                .bg(SURFACE)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(selected_space_label(app), Style::new().fg(MUTED)),
-    ]))
-    .render_with_id("conversation-pane", &app.conversation_pane, frame);
+        Span::styled(
+            selected_space_label(app),
+            Style::new().fg(MUTED).bg(SURFACE),
+        ),
+        Span::styled(" ".repeat(100), Style::new().bg(SURFACE)),
+    ]));
+    paint_component(
+        frame,
+        conversation_area,
+        &PaneComponent::new(
+            "conversation-pane",
+            conversation_pane,
+            &Cell::new(app.conversation_pane),
+            EmptyComponent,
+        ),
+    );
 
     let spaces = Arc::clone(&app.space_items);
     let list_area = space_list_area(spaces_area);
-    frame
-        .buffer_mut()
-        .fill(list_area, " ", Style::new().bg(SURFACE));
+    frame.fill(list_area, " ", Style::new().bg(SURFACE));
     spaces_list(spaces.as_slice()).render_with_fallback_style(
         list_area,
         &app.spaces,
@@ -1068,29 +1134,36 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         Style::new().fg(TEXT).bg(SURFACE),
     );
 
-    let conversation = Arc::clone(&app.conversation_lines);
     let conversation_area = conversation_content_area(conversation_area);
-    frame
-        .buffer_mut()
-        .fill(conversation_area, " ", Style::new().bg(SURFACE));
-    let conversation_view = TextView::new(conversation.as_slice()).styles(TextViewStyles {
-        text: Style::new().fg(TEXT).bg(SURFACE),
-        empty: Style::new().fg(MUTED).bg(SURFACE),
-        background: Style::new().bg(SURFACE),
-    });
+    frame.fill(conversation_area, " ", Style::new().bg(SURFACE));
+    let conversation_items = Arc::clone(&app.conversation_items);
+    let conversation_list = transcript_list(conversation_items.as_slice());
+    app.conversation_view.capture_anchor();
+    conversation_list.sync(
+        conversation_area.width,
+        &mut app.conversation_view,
+        &mut LayoutCx::new(),
+    );
+    app.conversation_view
+        .restore_anchor(usize::from(conversation_area.height));
     if app.follow_conversation_bottom {
-        app.conversation_view
-            .set_vertical_scroll(conversation_view.max_vertical_scroll(conversation_area));
+        app.conversation_view.scroll.set_vertical_offset(usize::MAX);
+        app.conversation_view.scroll.set_follow_bottom(true);
         app.follow_conversation_bottom = false;
     }
-    conversation_view.render(conversation_area, &app.conversation_view, frame);
-    extend_message_backgrounds(
-        frame,
-        conversation_area,
-        &conversation_view,
-        &app.conversation_view,
+    PaintCx::new(frame).with_child(
+        i32::from(conversation_area.x),
+        i64::from(conversation_area.y),
+        LocalRect::new(0, 0, conversation_area.width, conversation_area.height),
+        |cx| {
+            conversation_list.paint(
+                Rect::new(0, 0, conversation_area.width, conversation_area.height),
+                &app.conversation_view,
+                cx,
+            );
+        },
     );
-    render_thread_activity_hits(app, &conversation_view, conversation_area, frame);
+    render_thread_activity_hits(app, conversation_area, frame);
 
     let footer_y = area
         .y
@@ -1101,18 +1174,19 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         .iter()
         .map(|(key, label)| KeyHint::new(key, label))
         .collect::<Vec<_>>();
-    KeyHintBar::new(&hints)
-        .policy(KeyHintBarPolicy::compact())
-        .styles(key_hint_styles())
-        .render(Rect::new(area.x, footer_y, area.width, 1), frame);
-    Button::new("  ? HELP  ")
-        .styles(button_styles())
-        .render_with_id(
-            "help-button",
-            help_button_area(Rect::new(area.x, footer_y, area.width, 1)),
-            &app.help_button,
-            frame,
-        );
+    paint_component(
+        frame,
+        Rect::new(area.x, footer_y, area.width, 1),
+        &KeyHintBarComponent::new("key-hints", &hints)
+            .policy(KeyHintBarPolicy::compact())
+            .styles(key_hint_styles()),
+    );
+    paint_component(
+        frame,
+        help_button_area(Rect::new(area.x, footer_y, area.width, 1)),
+        &ButtonComponent::new("help-button", "  ? HELP  ", &Cell::new(app.help_button))
+            .styles(button_styles()),
+    );
     if app.alias_picker.is_some() {
         render_alias_picker(app, frame);
     }
@@ -1126,78 +1200,20 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     let severity = status_severity(app.product.phase);
     let status = [StatusSegment::new(status_text).severity(severity)];
     let right = [StatusSegment::new("READ ONLY").severity(StatusSeverity::Muted)];
-    StatusBar::new()
-        .left(&status)
-        .right(&right)
-        .policy(StatusBarPolicy::compact().background(true))
-        .styles(status_styles())
-        .render(
-            Rect::new(area.x, footer_y.saturating_add(1), area.width, 1),
-            frame,
-        );
-    enforce_opaque_viewport(frame, area);
-}
-
-fn extend_message_backgrounds(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    view: &TextView<'_>,
-    state: &TextViewState,
-) {
-    let layout = view.layout(area, state);
-    for (visible_row, line) in layout
-        .lines
-        .iter()
-        .skip(layout.vertical_scroll)
-        .take(usize::from(area.height))
-        .enumerate()
-    {
-        if !line
-            .spans
-            .iter()
-            .any(|span| span.style.bg == Some(MESSAGE_BG))
-        {
-            continue;
-        }
-        let Some(y) = u16::try_from(visible_row)
-            .ok()
-            .and_then(|row| area.y.checked_add(row))
-        else {
-            continue;
-        };
-        let start_x = area
-            .x
-            .saturating_add(u16::try_from(line.width()).unwrap_or(area.width));
-        for x in start_x.min(area.right())..area.right() {
-            if let Some(cell) = frame.buffer_mut().get_mut(Point::new(x, y)) {
-                cell.style.bg = Some(MESSAGE_BG);
-            }
-        }
-    }
-}
-
-fn enforce_opaque_viewport(frame: &mut Frame<'_>, area: Rect) {
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            let point = Point::new(x, y);
-            let Some(cell) = frame.buffer_mut().get_mut(point) else {
-                continue;
-            };
-            if cell.style.bg.is_none() || cell.style.bg == Some(Color::Default) {
-                cell.style.bg = Some(CANVAS);
-            }
-            if cell.style.fg == Some(Color::Default) {
-                cell.style.fg = Some(TEXT);
-            }
-        }
-    }
+    paint_component(
+        frame,
+        Rect::new(area.x, footer_y.saturating_add(1), area.width, 1),
+        &StatusBarComponent::new("status-bar")
+            .left(&status)
+            .right(&right)
+            .policy(StatusBarPolicy::compact().background(true))
+            .styles(status_styles()),
+    );
 }
 
 fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
-    frame
-        .buffer_mut()
-        .fill(area, " ", Style::new().bg(SURFACE_RAISED));
-    frame.buffer_mut().write_line(
+    frame.fill(area, " ", Style::new().bg(SURFACE_RAISED));
+    frame.write_line(
         Rect::new(
             area.x.saturating_add(1),
             area.y,
@@ -1207,13 +1223,25 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
         &Line::from_spans(vec![
             Span::styled(
                 "gchat",
-                Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(ACCENT_STRONG)
+                    .bg(SURFACE_RAISED)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("ui", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
-            Span::styled("  /  terminal conversations", Style::new().fg(MUTED)),
+            Span::styled(
+                "ui",
+                Style::new()
+                    .fg(TEXT)
+                    .bg(SURFACE_RAISED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  /  terminal conversations",
+                Style::new().fg(MUTED).bg(SURFACE_RAISED),
+            ),
         ]),
     );
-    frame.buffer_mut().write_line(
+    frame.write_line(
         Rect::new(
             area.x.saturating_add(1),
             area.y.saturating_add(1),
@@ -1221,8 +1249,13 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
             1,
         ),
         &Line::from_spans(vec![
-            Span::styled("● ", Style::new().fg(status_color(app.product.phase))),
-            Span::styled(status_text(app), Style::new().fg(MUTED)),
+            Span::styled(
+                "● ",
+                Style::new()
+                    .fg(status_color(app.product.phase))
+                    .bg(SURFACE_RAISED),
+            ),
+            Span::styled(status_text(app), Style::new().fg(MUTED).bg(SURFACE_RAISED)),
         ]),
     );
 }
@@ -1382,7 +1415,7 @@ fn spaces_list(items: &[SelectableListItem]) -> SelectableList<'_> {
     SelectableList::new(items)
         .policy(SelectableListPolicy {
             highlight: SelectableListHighlightPolicy::new("▌", true),
-            ..SelectableListPolicy::interactive().scrollbar(ScrollAreaScrollbarMode::Gutter)
+            ..SelectableListPolicy::interactive().scrollbar(ScrollbarAxisLayoutMode::Gutter)
         })
         .styles(list_styles())
 }
@@ -1440,16 +1473,28 @@ fn render_alias_picker(app: &mut App, frame: &mut Frame<'_>) {
         return;
     };
     let panel = Pane::new()
-        .title("  CHOOSE SENDER  ·  ENTER SELECTS  ·  ESC CANCELS")
+        .title(Line::from_spans([
+            Span::styled(
+                "  CHOOSE SENDER  ·  ENTER SELECTS  ·  ESC CANCELS",
+                Style::new().fg(TEXT).bg(SURFACE_RAISED),
+            ),
+            Span::styled(" ".repeat(100), Style::new().bg(SURFACE_RAISED)),
+        ]))
         .styles(PaneStyles {
             background: Some(Style::new().bg(SURFACE_RAISED)),
             border: Style::new().fg(ACCENT).bg(SURFACE_RAISED),
             focused_border: Style::new().fg(ACCENT_STRONG).bg(SURFACE_RAISED),
         });
-    let state = PaneState::new(area);
-    panel.render(&state, frame);
+    let pane_state = PaneState::new(area);
+    let inner_area = panel.inner_area(&pane_state);
+    let state = Cell::new(pane_state);
+    paint_component(
+        frame,
+        area,
+        &PaneComponent::new("dialog-pane", panel, &state, EmptyComponent),
+    );
     spaces_list(&picker.items).render_with_fallback_style(
-        panel.inner_area(&state),
+        inner_area,
         &picker.state,
         frame,
         Style::new().bg(SURFACE_RAISED).fg(TEXT),
@@ -1484,26 +1529,38 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
         return;
     };
     let panel = Pane::new()
-        .title("  SET LOCAL SENDER NAME")
+        .title(Line::from_spans([
+            Span::styled(
+                "  SET LOCAL SENDER NAME",
+                Style::new().fg(TEXT).bg(SURFACE_RAISED),
+            ),
+            Span::styled(" ".repeat(100), Style::new().bg(SURFACE_RAISED)),
+        ]))
         .styles(PaneStyles {
             background: Some(Style::new().bg(SURFACE_RAISED)),
             border: Style::new().fg(ACCENT).bg(SURFACE_RAISED),
             focused_border: Style::new().fg(ACCENT_STRONG).bg(SURFACE_RAISED),
         });
-    let state = PaneState::new(area);
-    panel.render(&state, frame);
+    let state = Cell::new(PaneState::new(area));
+    paint_component(
+        frame,
+        area,
+        &PaneComponent::new("dialog-pane", panel, &state, EmptyComponent),
+    );
     let content = alias_editor_content_area(app.conversation_pane.area);
-    frame
-        .buffer_mut()
-        .fill(content, " ", Style::new().bg(SURFACE_RAISED));
-    let mut input =
-        TextInputBox::new(bmux_tui_components::text_input::TextInputPolicy::chat_composer())
-            .placeholder("Type a local display name…")
-            .policy(TextInputBoxPolicy::bare().focused(true).rows(1, Some(1)));
+    frame.fill(content, " ", Style::new().bg(SURFACE_RAISED));
+    let input_state = RefCell::new(editor.input.clone());
+    let mut input = TextInputBoxComponent::new(
+        "sender-alias-input",
+        bmux_tui_components::text_input::TextInputPolicy::chat_composer(),
+        &input_state,
+    )
+    .placeholder("Type a local display name…")
+    .policy(TextInputBoxPolicy::bare().focused(true).rows(1, Some(1)));
     if let Some(error) = editor.error.as_deref() {
         input = input.error(error);
     }
-    frame.buffer_mut().write_line(
+    frame.write_line(
         Rect::new(
             content.x,
             content.y.saturating_add(content.height.saturating_sub(1)),
@@ -1516,7 +1573,8 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
         )]),
     );
     let input_area = Rect::new(content.x, content.y, content.width, 1);
-    input.render_with_id("sender-alias-input", input_area, &mut editor.input, frame);
+    paint_component(frame, input_area, &input);
+    editor.input = input_state.into_inner();
 }
 
 fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -1526,10 +1584,8 @@ fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
         area.width.saturating_sub(4),
         area.height.saturating_sub(2).min(10),
     );
-    frame
-        .buffer_mut()
-        .fill(overlay, " ", Style::new().bg(SURFACE_RAISED));
-    frame.buffer_mut().write_line(
+    frame.fill(overlay, " ", Style::new().bg(SURFACE_RAISED));
+    frame.write_line(
         Rect::new(
             overlay.x.saturating_add(2),
             overlay.y,
@@ -1560,7 +1616,7 @@ fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
         if labels.is_empty() {
             continue;
         }
-        frame.buffer_mut().write_line(
+        frame.write_line(
             Rect::new(
                 overlay.x.saturating_add(2),
                 overlay.y.saturating_add(2).saturating_add(index),
@@ -1634,29 +1690,6 @@ mod tests {
     use bmux_tui::geometry::Point;
 
     #[test]
-    fn text_view_code_viewports_are_stable_across_scroll_offsets() {
-        let lines = vec![
-            Line::from("fn main() {"),
-            Line::from("    let value = very_long_function_name(argument_one, argument_two);"),
-            Line::from("    println!(\"👩🏽‍💻 {value}\");"),
-            Line::from("}"),
-        ];
-        let view = TextView::new(&lines);
-        let area = Rect::new(0, 0, 24, 3);
-        let canonical = view.layout(area, &TextViewState::new()).lines;
-        for offset in 0..canonical.len() {
-            let mut state = TextViewState::new();
-            state.set_vertical_scroll(offset);
-            let layout = view.layout(area, &state);
-            assert_eq!(layout.lines, canonical);
-            assert_eq!(
-                layout.vertical_scroll,
-                offset.min(canonical.len().saturating_sub(usize::from(area.height)))
-            );
-        }
-    }
-
-    #[test]
     fn first_sender_in_alias_picker_can_be_selected_immediately() {
         let mut app = App::new(KeybindingRegistry::default());
         app.product.phase = Phase::Ready;
@@ -1720,12 +1753,14 @@ mod tests {
     fn every_rendered_cell_has_an_explicit_opaque_background() {
         let mut app = App::new(KeybindingRegistry::default());
         let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 30));
-        for cell in buffer.cells() {
+        for (index, cell) in buffer.cells().iter().enumerate() {
             assert!(
                 cell.style
                     .bg
                     .is_some_and(|background| background != Color::Default),
-                "cell {:?} used the transparent terminal background",
+                "cell ({}, {}) {:?} used the transparent terminal background",
+                index % 100,
+                index / 100,
                 cell.symbol
             );
         }
@@ -1750,15 +1785,15 @@ mod tests {
         app.rebuild_projections();
         app.follow_conversation_bottom = true;
         let _buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 24));
-        assert!(app.conversation_view.vertical_scroll() > 0);
+        assert!(app.conversation_view.scroll.vertical_offset() > 0);
         let left_before = app.spaces.vertical_scroll();
-        let right_before = app.conversation_view.vertical_scroll();
+        let right_before = app.conversation_view.scroll.vertical_offset();
 
         app.focused_pane = FocusedPane::Conversation;
         let up = "k".parse::<crate::keybind::KeyChord>().unwrap();
         let _ = app.update_terminal(Event::Key(up.stroke()));
         assert_eq!(app.spaces.vertical_scroll(), left_before);
-        assert!(app.conversation_view.vertical_scroll() < right_before);
+        assert!(app.conversation_view.scroll.vertical_offset() < right_before);
 
         let right_point = Point::new(
             app.conversation_pane.area.x.saturating_add(2),
@@ -1805,20 +1840,12 @@ mod tests {
         ];
         app.product.phase = Phase::Ready;
         app.rebuild_projections();
-        app.conversation_view.set_vertical_scroll(usize::MAX);
+        app.conversation_view.scroll.set_vertical_offset(usize::MAX);
         let (_buffer, hits) = render_to_buffer_and_hits(&mut app, Rect::new(0, 0, 70, 16));
         app.interactions.commit_scene(hits, None);
         let link = app.thread_activity_links.first().unwrap();
-        let view = TextView::new(app.conversation_lines.as_slice());
         let area = conversation_content_area(app.conversation_pane.area);
-        let hit_area = thread_activity_area(
-            link,
-            app.conversation_lines.as_slice(),
-            &view,
-            &app.conversation_view,
-            area,
-        )
-        .unwrap();
+        let hit_area = thread_activity_area(link, &app.conversation_view, area).unwrap();
         let point = Point::new(hit_area.x.saturating_add(2), hit_area.y);
         let _ = app.update_terminal(Event::Mouse(MouseEvent::new(
             MouseEventKind::Down(MouseButton::Left),
@@ -1828,7 +1855,7 @@ mod tests {
             MouseEventKind::Up(MouseButton::Left),
             point,
         )));
-        assert_eq!(app.conversation_view.vertical_scroll(), 0);
+        assert_eq!(app.conversation_view.scroll.vertical_offset(), 0);
     }
 
     #[test]
