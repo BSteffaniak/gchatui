@@ -54,7 +54,7 @@ pub async fn login(
     }
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let redirect = callback
-        .wait(std::time::Duration::from_secs(180), cancel_rx)
+        .wait(std::time::Duration::from_mins(3), cancel_rx)
         .await?;
     let exchange =
         request.accept_redirect(&redirect, &client, redirect_origin(&redirect).as_str())?;

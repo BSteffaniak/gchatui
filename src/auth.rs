@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 use crate::credential::{CredentialError, CredentialStore, Secret};
 use crate::oauth::{InstalledClient, OAuthError, OAuthTokens, RefreshRequest};
 
-const EXPIRY_SKEW: Duration = Duration::from_secs(60);
+const EXPIRY_SKEW: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthStatus {

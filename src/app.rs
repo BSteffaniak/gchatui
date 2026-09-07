@@ -997,12 +997,12 @@ fn thread_activity_area(
     (row < area.height).then_some(Rect::new(area.x, area.y.saturating_add(row), area.width, 1))
 }
 
-fn render_thread_activity_hits(app: &App, area: Rect, frame: &mut Frame<'_>) {
+fn render_thread_activity_hits(app: &App, area: Rect, cx: &mut PaintCx<'_, '_>) {
     for link in app.thread_activity_links.iter() {
         let Some(hit_area) = thread_activity_area(link, &app.conversation_view, area) else {
             continue;
         };
-        frame.push_hit(
+        cx.push_hit(
             HitRegion::new(HitId::new(link.id.clone()), hit_area)
                 .role(HitRole::Action)
                 .hoverable(true)
@@ -1044,11 +1044,16 @@ fn paint_component(frame: &mut Frame<'_>, area: Rect, component: &impl Component
 #[allow(clippy::too_many_lines)]
 fn render(app: &mut App, frame: &mut Frame<'_>) {
     let area = frame.area();
-    frame.fill(area, " ", Style::new().bg(CANVAS).fg(TEXT));
+    PaintCx::new(frame).fill(
+        LocalRect::terminal(area),
+        " ",
+        Style::new().bg(CANVAS).fg(TEXT),
+    );
     if area.width < 20 || area.height < 6 {
-        frame.write_line(
-            Rect::new(area.x, area.y, area.width, 1),
+        PaintCx::new(frame).write_line_with_fallback_style(
+            LocalRect::terminal(Rect::new(area.x, area.y, area.width, 1)),
             &Line::from("Terminal is too small"),
+            Style::new().fg(TEXT).bg(CANVAS),
         );
         return;
     }
@@ -1056,10 +1061,10 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     let header_height = 2;
     let footer_height = 2;
     let body_height = area.height.saturating_sub(header_height + footer_height);
-    render_header(
-        app,
+    paint_component(
         frame,
         Rect::new(area.x, area.y, area.width, header_height),
+        &HeaderComponent(app),
     );
     let body_y = area.y.saturating_add(header_height);
     let spaces_width = (area.width / 3).clamp(22, 38);
@@ -1126,7 +1131,11 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
 
     let spaces = Arc::clone(&app.space_items);
     let list_area = space_list_area(spaces_area);
-    frame.fill(list_area, " ", Style::new().bg(SURFACE));
+    PaintCx::new(frame).fill(
+        LocalRect::terminal(list_area),
+        " ",
+        Style::new().bg(SURFACE),
+    );
     spaces_list(spaces.as_slice()).render_with_fallback_style(
         list_area,
         &app.spaces,
@@ -1135,7 +1144,11 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     );
 
     let conversation_area = conversation_content_area(conversation_area);
-    frame.fill(conversation_area, " ", Style::new().bg(SURFACE));
+    PaintCx::new(frame).fill(
+        LocalRect::terminal(conversation_area),
+        " ",
+        Style::new().bg(SURFACE),
+    );
     let conversation_items = Arc::clone(&app.conversation_items);
     let conversation_list = transcript_list(conversation_items.as_slice());
     app.conversation_view.capture_anchor();
@@ -1163,7 +1176,7 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
             );
         },
     );
-    render_thread_activity_hits(app, conversation_area, frame);
+    render_thread_activity_hits(app, conversation_area, &mut PaintCx::new(frame));
 
     let footer_y = area
         .y
@@ -1194,7 +1207,13 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         render_alias_editor(app, frame);
     }
     if app.help_visible {
-        render_help(app, frame, app.conversation_pane.area);
+        let area = app.conversation_pane.area;
+        PaintCx::new(frame).with_child(
+            i32::from(area.x),
+            i64::from(area.y),
+            LocalRect::new(0, 0, area.width, area.height),
+            |cx| render_help(app, cx, Rect::new(0, 0, area.width, area.height)),
+        );
     }
     let status_text = status_text(app);
     let severity = status_severity(app.product.phase);
@@ -1211,15 +1230,52 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     );
 }
 
-fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
-    frame.fill(area, " ", Style::new().bg(SURFACE_RAISED));
-    frame.write_line(
-        Rect::new(
+struct HeaderComponent<'a>(&'a App);
+
+impl Component for HeaderComponent<'_> {
+    fn layout(&self, constraints: Constraints, cx: &mut LayoutCx) -> LayoutNode {
+        cx.record_measurement();
+        let width = "gchatui  /  terminal conversations"
+            .chars()
+            .count()
+            .max(status_text(self.0).chars().count().saturating_add(2))
+            .saturating_add(2);
+        LayoutNode::leaf(
+            LayoutId::new("header"),
+            constraints.constrain(LogicalSize::new(
+                u16::try_from(width).unwrap_or(u16::MAX),
+                2,
+            )),
+        )
+    }
+
+    fn paint(&self, layout: &LayoutNode, cx: &mut PaintCx<'_, '_>) {
+        render_header(
+            self.0,
+            cx,
+            Rect::new(
+                0,
+                0,
+                layout.size.width,
+                u16::try_from(layout.size.height).unwrap_or(u16::MAX),
+            ),
+        );
+    }
+}
+
+fn render_header(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
+    cx.fill(
+        LocalRect::terminal(area),
+        " ",
+        Style::new().bg(SURFACE_RAISED),
+    );
+    cx.write_line_with_fallback_style(
+        LocalRect::terminal(Rect::new(
             area.x.saturating_add(1),
             area.y,
             area.width.saturating_sub(2),
             1,
-        ),
+        )),
         &Line::from_spans(vec![
             Span::styled(
                 "gchat",
@@ -1240,14 +1296,15 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 Style::new().fg(MUTED).bg(SURFACE_RAISED),
             ),
         ]),
+        Style::new().fg(TEXT).bg(SURFACE_RAISED),
     );
-    frame.write_line(
-        Rect::new(
+    cx.write_line_with_fallback_style(
+        LocalRect::terminal(Rect::new(
             area.x.saturating_add(1),
             area.y.saturating_add(1),
             area.width.saturating_sub(2),
             1,
-        ),
+        )),
         &Line::from_spans(vec![
             Span::styled(
                 "● ",
@@ -1257,6 +1314,7 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
             ),
             Span::styled(status_text(app), Style::new().fg(MUTED).bg(SURFACE_RAISED)),
         ]),
+        Style::new().fg(TEXT).bg(SURFACE_RAISED),
     );
 }
 
@@ -1548,7 +1606,11 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
         &PaneComponent::new("dialog-pane", panel, &state, EmptyComponent),
     );
     let content = alias_editor_content_area(app.conversation_pane.area);
-    frame.fill(content, " ", Style::new().bg(SURFACE_RAISED));
+    PaintCx::new(frame).fill(
+        LocalRect::terminal(content),
+        " ",
+        Style::new().bg(SURFACE_RAISED),
+    );
     let input_state = RefCell::new(editor.input.clone());
     let mut input = TextInputBoxComponent::new(
         "sender-alias-input",
@@ -1560,42 +1622,48 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
     if let Some(error) = editor.error.as_deref() {
         input = input.error(error);
     }
-    frame.write_line(
-        Rect::new(
+    PaintCx::new(frame).write_line_with_fallback_style(
+        LocalRect::terminal(Rect::new(
             content.x,
             content.y.saturating_add(content.height.saturating_sub(1)),
             content.width,
             1,
-        ),
+        )),
         &Line::from_spans([Span::styled(
             "Enter saves  ·  Esc cancels",
             Style::new().fg(MUTED),
         )]),
+        Style::new().fg(TEXT).bg(SURFACE_RAISED),
     );
     let input_area = Rect::new(content.x, content.y, content.width, 1);
     paint_component(frame, input_area, &input);
     editor.input = input_state.into_inner();
 }
 
-fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
+fn render_help(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
     let overlay = Rect::new(
         area.x.saturating_add(2),
         area.y.saturating_add(1),
         area.width.saturating_sub(4),
         area.height.saturating_sub(2).min(10),
     );
-    frame.fill(overlay, " ", Style::new().bg(SURFACE_RAISED));
-    frame.write_line(
-        Rect::new(
+    cx.fill(
+        LocalRect::terminal(overlay),
+        " ",
+        Style::new().bg(SURFACE_RAISED),
+    );
+    cx.write_line_with_fallback_style(
+        LocalRect::terminal(Rect::new(
             overlay.x.saturating_add(2),
             overlay.y,
             overlay.width.saturating_sub(4),
             1,
-        ),
+        )),
         &Line::from_spans(vec![Span::styled(
             "KEYBOARD SHORTCUTS",
             Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
         )]),
+        Style::new().fg(TEXT).bg(SURFACE_RAISED),
     );
     let rows = [
         Action::FocusNext,
@@ -1616,13 +1684,13 @@ fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
         if labels.is_empty() {
             continue;
         }
-        frame.write_line(
-            Rect::new(
+        cx.write_line_with_fallback_style(
+            LocalRect::terminal(Rect::new(
                 overlay.x.saturating_add(2),
                 overlay.y.saturating_add(2).saturating_add(index),
                 overlay.width.saturating_sub(4),
                 1,
-            ),
+            )),
             &Line::from_spans(vec![
                 Span::styled(
                     format!("{labels:<16}"),
@@ -1630,6 +1698,7 @@ fn render_help(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 ),
                 Span::styled(action.label(), Style::new().fg(TEXT)),
             ]),
+            Style::new().fg(TEXT).bg(SURFACE_RAISED),
         );
     }
 }
@@ -1688,6 +1757,55 @@ mod tests {
 
     use bmux_tui::event::{MouseButton, MouseEvent, MouseEventKind};
     use bmux_tui::geometry::Point;
+
+    #[test]
+    fn header_paint_is_translated_and_clipped_to_its_child() {
+        let app = App::new(KeybindingRegistry::default());
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        let mut frame = Frame::new(&mut buffer);
+        let header = HeaderComponent(&app);
+        let layout = header.layout(Constraints::tight(Size::new(12, 2)), &mut LayoutCx::new());
+        assert_eq!(layout.size, LogicalSize::new(12, 2));
+        PaintCx::new(&mut frame).with_child(3, 1, LocalRect::new(0, 0, 4, 1), |cx| {
+            header.paint(&layout, cx);
+        });
+        drop(frame);
+        assert_eq!(buffer.get(Point::new(4, 1)).unwrap().symbol, "g");
+        assert_eq!(buffer.get(Point::new(5, 1)).unwrap().symbol, "c");
+        assert_eq!(buffer.get(Point::new(6, 1)).unwrap().symbol, "h");
+        for y in 0..5 {
+            for x in 0..20 {
+                if y != 1 || !(3..7).contains(&x) {
+                    let cell = buffer.get(Point::new(x, y)).unwrap();
+                    assert_eq!(cell.symbol, " ");
+                    assert_eq!(cell.style, Style::new());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn help_paint_is_translated_and_clipped_to_its_child() {
+        let app = App::new(KeybindingRegistry::default());
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 12));
+        let mut frame = Frame::new(&mut buffer);
+        PaintCx::new(&mut frame).with_child(3, 2, LocalRect::new(0, 0, 7, 2), |cx| {
+            render_help(&app, cx, Rect::new(0, 0, 24, 10));
+        });
+        drop(frame);
+        assert_eq!(buffer.get(Point::new(7, 3)).unwrap().symbol, "K");
+        assert_eq!(buffer.get(Point::new(8, 3)).unwrap().symbol, "E");
+        assert_eq!(buffer.get(Point::new(9, 3)).unwrap().symbol, "Y");
+        for y in 0..12 {
+            for x in 0..30 {
+                if y != 3 || !(5..10).contains(&x) {
+                    let cell = buffer.get(Point::new(x, y)).unwrap();
+                    assert_eq!(cell.symbol, " ");
+                    assert_eq!(cell.style, Style::new());
+                }
+            }
+        }
+    }
 
     #[test]
     fn first_sender_in_alias_picker_can_be_selected_immediately() {
