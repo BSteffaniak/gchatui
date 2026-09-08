@@ -1050,10 +1050,14 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         Style::new().bg(CANVAS).fg(TEXT),
     );
     if area.width < 20 || area.height < 6 {
-        PaintCx::new(frame).write_line_with_fallback_style(
-            LocalRect::terminal(Rect::new(area.x, area.y, area.width, 1)),
-            &Line::from("Terminal is too small"),
-            Style::new().fg(TEXT).bg(CANVAS),
+        paint_component(
+            frame,
+            area,
+            &bmux_tui::prelude::TextBlock::new(bmux_tui::prelude::Text::from_lines([Line::from(
+                "Terminal is too small",
+            )]))
+            .wrap(bmux_tui::text::TextWrap::None)
+            .style(Style::new().fg(TEXT).bg(CANVAS)),
         );
         return;
     }
@@ -1067,7 +1071,7 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         &HeaderComponent(app),
     );
     let body_y = area.y.saturating_add(header_height);
-    let spaces_width = (area.width / 3).clamp(22, 38);
+    let spaces_width = (area.width / 3).clamp(22, 38).min(area.width);
     let gap = u16::from(area.width >= 70);
     let spaces_area = Rect::new(area.x, body_y, spaces_width, body_height);
     let conversation_area = Rect::new(
@@ -1174,13 +1178,6 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
                 &app.conversation_view,
                 cx,
             );
-        },
-    );
-    PaintCx::new(frame).with_child(
-        i32::from(conversation_area.x),
-        i64::from(conversation_area.y),
-        LocalRect::new(0, 0, conversation_area.width, conversation_area.height),
-        |cx| {
             render_thread_activity_hits(
                 app,
                 Rect::new(0, 0, conversation_area.width, conversation_area.height),
@@ -1654,18 +1651,30 @@ const HELP_ACTIONS: [Action; 6] = [
     Action::Quit,
 ];
 
+fn help_title_line() -> Line {
+    Line::from_spans(vec![Span::styled(
+        "KEYBOARD SHORTCUTS",
+        Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
+    )])
+}
+
 fn help_action_line(app: &App, action: Action) -> Option<Line> {
     let labels = app.bindings.labels_for(action).join(", ");
     if labels.is_empty() {
         return None;
     }
-    Some(Line::from_spans(vec![
+    Some(help_shortcut_line(&labels, action.label()))
+}
+
+fn help_shortcut_line(labels: &str, label: &str) -> Line {
+    let padding = " ".repeat(16_usize.saturating_sub(Span::raw(labels).width()));
+    Line::from_spans(vec![
         Span::styled(
-            format!("{labels:<16}"),
+            format!("{labels}{padding}"),
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(action.label(), Style::new().fg(TEXT)),
-    ]))
+        Span::styled(label, Style::new().fg(TEXT)),
+    ])
 }
 
 struct HelpComponent<'a>(&'a App);
@@ -1679,7 +1688,7 @@ impl Component for HelpComponent<'_> {
             .map(|line| line.width())
             .max()
             .unwrap_or(0)
-            .max("KEYBOARD SHORTCUTS".len())
+            .max(help_title_line().width())
             .saturating_add(8);
         LayoutNode::leaf(
             LayoutId::new("help"),
@@ -1726,10 +1735,7 @@ fn render_help(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
             overlay.width.saturating_sub(4),
             1,
         )),
-        &Line::from_spans(vec![Span::styled(
-            "KEYBOARD SHORTCUTS",
-            Style::new().fg(ACCENT_STRONG).add_modifier(Modifier::BOLD),
-        )]),
+        &help_title_line(),
         Style::new().fg(TEXT).bg(SURFACE_RAISED),
     );
     for (index, action) in HELP_ACTIONS.into_iter().enumerate() {
@@ -1809,6 +1815,86 @@ mod tests {
 
     use bmux_tui::event::{MouseButton, MouseEvent, MouseEventKind};
     use bmux_tui::geometry::Point;
+
+    #[test]
+    fn narrow_layout_keeps_sidebar_within_available_width() {
+        for width in 20..=22 {
+            let mut app = App::new(KeybindingRegistry::default());
+            let area = Rect::new(3, 2, width, 10);
+            render_to_buffer(&mut app, area);
+            assert_eq!(app.space_pane.area.x, area.x);
+            assert_eq!(app.space_pane.area.width, width);
+            assert_eq!(app.conversation_pane.area.width, 0);
+            assert_eq!(app.conversation_pane.area.x, area.x + width);
+        }
+    }
+
+    #[test]
+    fn small_terminal_fallback_is_local_opaque_and_does_not_wrap() {
+        let mut app = App::new(KeybindingRegistry::default());
+        let area = Rect::new(3, 2, 10, 4);
+        let (buffer, hits) = render_to_buffer_and_hits(&mut app, area);
+        let first_row: String = (3..13)
+            .map(|x| buffer.get(Point::new(x, 2)).unwrap().symbol.as_str())
+            .collect();
+        assert_eq!(first_row, "Terminal i");
+        for y in 2..6 {
+            for x in 3..13 {
+                let cell = buffer.get(Point::new(x, y)).unwrap();
+                assert_eq!(cell.style.bg, Some(CANVAS));
+                if y > 2 {
+                    assert_eq!(cell.symbol, " ");
+                }
+            }
+        }
+        assert!(hits.regions().is_empty());
+    }
+
+    #[test]
+    fn header_preferred_width_fits_short_and_long_statuses() {
+        let mut app = App::new(KeybindingRegistry::default());
+        for phase in [Phase::Ready, Phase::RecoverableError] {
+            app.product.phase = phase;
+            let expected_width = u16::try_from(
+                Line::from_spans([Span::raw("gchatui  /  terminal conversations")])
+                    .width()
+                    .max(Line::from_spans([Span::raw(format!("● {}", status_text(&app)))]).width())
+                    + 2,
+            )
+            .unwrap();
+            let header = HeaderComponent(&app);
+            let layout =
+                header.layout(Constraints::loose(Size::new(100, 10)), &mut LayoutCx::new());
+            assert_eq!(layout.size, LogicalSize::new(expected_width, 2));
+            let mut buffer = Buffer::empty(Rect::new(0, 0, expected_width, 2));
+            let mut frame = Frame::new(&mut buffer);
+            header.paint(&layout, &mut PaintCx::new(&mut frame));
+            drop(frame);
+            let status: String = (0..expected_width)
+                .map(|x| buffer.get(Point::new(x, 1)).unwrap().symbol.as_str())
+                .collect();
+            assert_eq!(status.trim(), format!("● {}", status_text(&app)));
+        }
+    }
+
+    #[test]
+    fn help_shortcut_column_uses_display_width_for_wide_keys() {
+        let line = help_shortcut_line("界", Action::Help.label());
+        assert_eq!(line.spans[0].width(), 16);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let mut frame = Frame::new(&mut buffer);
+        PaintCx::new(&mut frame).write_line_with_fallback_style(
+            LocalRect::new(0, 0, 40, 1),
+            &line,
+            Style::new(),
+        );
+        drop(frame);
+        assert_eq!(buffer.get(Point::new(0, 0)).unwrap().symbol, "界");
+        assert_eq!(
+            buffer.get(Point::new(16, 0)).unwrap().symbol,
+            Action::Help.label().chars().next().unwrap().to_string(),
+        );
+    }
 
     #[test]
     fn help_without_bound_actions_measures_only_its_title() {
