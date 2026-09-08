@@ -1176,7 +1176,18 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
             );
         },
     );
-    render_thread_activity_hits(app, conversation_area, &mut PaintCx::new(frame));
+    PaintCx::new(frame).with_child(
+        i32::from(conversation_area.x),
+        i64::from(conversation_area.y),
+        LocalRect::new(0, 0, conversation_area.width, conversation_area.height),
+        |cx| {
+            render_thread_activity_hits(
+                app,
+                Rect::new(0, 0, conversation_area.width, conversation_area.height),
+                cx,
+            );
+        },
+    );
 
     let footer_y = area
         .y
@@ -1207,13 +1218,7 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         render_alias_editor(app, frame);
     }
     if app.help_visible {
-        let area = app.conversation_pane.area;
-        PaintCx::new(frame).with_child(
-            i32::from(area.x),
-            i64::from(area.y),
-            LocalRect::new(0, 0, area.width, area.height),
-            |cx| render_help(app, cx, Rect::new(0, 0, area.width, area.height)),
-        );
+        paint_component(frame, app.conversation_pane.area, &HelpComponent(app));
     }
     let status_text = status_text(app);
     let severity = status_severity(app.product.phase);
@@ -1235,10 +1240,11 @@ struct HeaderComponent<'a>(&'a App);
 impl Component for HeaderComponent<'_> {
     fn layout(&self, constraints: Constraints, cx: &mut LayoutCx) -> LayoutNode {
         cx.record_measurement();
-        let width = "gchatui  /  terminal conversations"
-            .chars()
-            .count()
-            .max(status_text(self.0).chars().count().saturating_add(2))
+        let width = header_lines(self.0)
+            .iter()
+            .map(Line::width)
+            .max()
+            .unwrap_or(0)
             .saturating_add(2);
         LayoutNode::leaf(
             LayoutId::new("header"),
@@ -1263,20 +1269,9 @@ impl Component for HeaderComponent<'_> {
     }
 }
 
-fn render_header(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
-    cx.fill(
-        LocalRect::terminal(area),
-        " ",
-        Style::new().bg(SURFACE_RAISED),
-    );
-    cx.write_line_with_fallback_style(
-        LocalRect::terminal(Rect::new(
-            area.x.saturating_add(1),
-            area.y,
-            area.width.saturating_sub(2),
-            1,
-        )),
-        &Line::from_spans(vec![
+fn header_lines(app: &App) -> [Line; 2] {
+    [
+        Line::from_spans(vec![
             Span::styled(
                 "gchat",
                 Style::new()
@@ -1296,16 +1291,7 @@ fn render_header(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
                 Style::new().fg(MUTED).bg(SURFACE_RAISED),
             ),
         ]),
-        Style::new().fg(TEXT).bg(SURFACE_RAISED),
-    );
-    cx.write_line_with_fallback_style(
-        LocalRect::terminal(Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            area.width.saturating_sub(2),
-            1,
-        )),
-        &Line::from_spans(vec![
+        Line::from_spans(vec![
             Span::styled(
                 "● ",
                 Style::new()
@@ -1314,8 +1300,27 @@ fn render_header(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
             ),
             Span::styled(status_text(app), Style::new().fg(MUTED).bg(SURFACE_RAISED)),
         ]),
-        Style::new().fg(TEXT).bg(SURFACE_RAISED),
+    ]
+}
+
+fn render_header(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
+    cx.fill(
+        LocalRect::terminal(area),
+        " ",
+        Style::new().bg(SURFACE_RAISED),
     );
+    for (row, line) in (0..area.height).zip(header_lines(app)) {
+        cx.write_line_with_fallback_style(
+            LocalRect::new(
+                i32::from(area.x) + 1,
+                i64::from(area.y) + i64::from(row),
+                area.width.saturating_sub(2),
+                1,
+            ),
+            &line,
+            Style::new().fg(TEXT).bg(SURFACE_RAISED),
+        );
+    }
 }
 
 fn selected_space_label(app: &App) -> String {
@@ -1640,6 +1645,65 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
     editor.input = input_state.into_inner();
 }
 
+const HELP_ACTIONS: [Action; 6] = [
+    Action::FocusNext,
+    Action::MoveDown,
+    Action::Activate,
+    Action::Refresh,
+    Action::Help,
+    Action::Quit,
+];
+
+fn help_action_line(app: &App, action: Action) -> Option<Line> {
+    let labels = app.bindings.labels_for(action).join(", ");
+    if labels.is_empty() {
+        return None;
+    }
+    Some(Line::from_spans(vec![
+        Span::styled(
+            format!("{labels:<16}"),
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(action.label(), Style::new().fg(TEXT)),
+    ]))
+}
+
+struct HelpComponent<'a>(&'a App);
+
+impl Component for HelpComponent<'_> {
+    fn layout(&self, constraints: Constraints, cx: &mut LayoutCx) -> LayoutNode {
+        cx.record_measurement();
+        let width = HELP_ACTIONS
+            .iter()
+            .filter_map(|action| help_action_line(self.0, *action))
+            .map(|line| line.width())
+            .max()
+            .unwrap_or(0)
+            .max("KEYBOARD SHORTCUTS".len())
+            .saturating_add(8);
+        LayoutNode::leaf(
+            LayoutId::new("help"),
+            constraints.constrain(LogicalSize::new(
+                u16::try_from(width).unwrap_or(u16::MAX),
+                12,
+            )),
+        )
+    }
+
+    fn paint(&self, layout: &LayoutNode, cx: &mut PaintCx<'_, '_>) {
+        render_help(
+            self.0,
+            cx,
+            Rect::new(
+                0,
+                0,
+                layout.size.width,
+                u16::try_from(layout.size.height).unwrap_or(u16::MAX),
+            ),
+        );
+    }
+}
+
 fn render_help(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
     let overlay = Rect::new(
         area.x.saturating_add(2),
@@ -1647,6 +1711,9 @@ fn render_help(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
         area.width.saturating_sub(4),
         area.height.saturating_sub(2).min(10),
     );
+    if overlay.is_empty() {
+        return;
+    }
     cx.fill(
         LocalRect::terminal(overlay),
         " ",
@@ -1665,25 +1732,16 @@ fn render_help(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
         )]),
         Style::new().fg(TEXT).bg(SURFACE_RAISED),
     );
-    let rows = [
-        Action::FocusNext,
-        Action::MoveDown,
-        Action::Activate,
-        Action::Refresh,
-        Action::Help,
-        Action::Quit,
-    ];
-    for (index, action) in rows.into_iter().enumerate() {
+    for (index, action) in HELP_ACTIONS.into_iter().enumerate() {
         let Ok(index) = u16::try_from(index) else {
             break;
         };
         if index.saturating_add(2) >= overlay.height {
             break;
         }
-        let labels = app.bindings.labels_for(action).join(", ");
-        if labels.is_empty() {
+        let Some(line) = help_action_line(app, action) else {
             continue;
-        }
+        };
         cx.write_line_with_fallback_style(
             LocalRect::terminal(Rect::new(
                 overlay.x.saturating_add(2),
@@ -1691,13 +1749,7 @@ fn render_help(app: &App, cx: &mut PaintCx<'_, '_>, area: Rect) {
                 overlay.width.saturating_sub(4),
                 1,
             )),
-            &Line::from_spans(vec![
-                Span::styled(
-                    format!("{labels:<16}"),
-                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(action.label(), Style::new().fg(TEXT)),
-            ]),
+            &line,
             Style::new().fg(TEXT).bg(SURFACE_RAISED),
         );
     }
@@ -1759,6 +1811,78 @@ mod tests {
     use bmux_tui::geometry::Point;
 
     #[test]
+    fn help_without_bound_actions_measures_only_its_title() {
+        let overrides = crate::keybind::KeybindingOverrides {
+            unbind: HELP_ACTIONS.to_vec(),
+            ..Default::default()
+        };
+        let app = App::new(KeybindingRegistry::with_overrides(&overrides).unwrap());
+        let help = HelpComponent(&app);
+        let layout = help.layout(Constraints::loose(Size::new(100, 20)), &mut LayoutCx::new());
+        assert_eq!(layout.size, LogicalSize::new(26, 12));
+        for action in HELP_ACTIONS {
+            assert!(help_action_line(&app, action).is_none());
+        }
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 26, 12));
+        let mut frame = Frame::new(&mut buffer);
+        help.paint(&layout, &mut PaintCx::new(&mut frame));
+        drop(frame);
+        assert_eq!(buffer.get(Point::new(4, 1)).unwrap().symbol, "K");
+        for y in 3..11 {
+            for x in 4..21 {
+                assert_eq!(buffer.get(Point::new(x, y)).unwrap().symbol, " ");
+            }
+        }
+    }
+
+    #[test]
+    fn help_with_empty_inset_does_not_paint_into_parent() {
+        let app = App::new(KeybindingRegistry::default());
+        for area in [
+            Rect::new(0, 0, 30, 0),
+            Rect::new(0, 0, 30, 1),
+            Rect::new(0, 0, 30, 2),
+            Rect::new(0, 0, 4, 10),
+        ] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 12));
+            let expected = buffer.clone();
+            let mut frame = Frame::new(&mut buffer);
+            render_help(&app, &mut PaintCx::new(&mut frame), area);
+            drop(frame);
+            assert_eq!(buffer, expected);
+        }
+    }
+
+    #[test]
+    fn header_paint_respects_allocated_height_inside_a_larger_clip() {
+        let app = App::new(KeybindingRegistry::default());
+        for height in 0..=2 {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 4));
+            let mut frame = Frame::new(&mut buffer);
+            let header = HeaderComponent(&app);
+            let layout = header.layout(
+                Constraints::tight(Size::new(60, height)),
+                &mut LayoutCx::new(),
+            );
+            header.paint(&layout, &mut PaintCx::new(&mut frame));
+            drop(frame);
+            for y in height..4 {
+                for x in 0..60 {
+                    let cell = buffer.get(Point::new(x, y)).unwrap();
+                    assert_eq!(cell.symbol, " ");
+                    assert_eq!(cell.style, Style::new());
+                }
+            }
+            if height > 0 {
+                assert_eq!(buffer.get(Point::new(1, 0)).unwrap().symbol, "g");
+            }
+            if height > 1 {
+                assert_eq!(buffer.get(Point::new(1, 1)).unwrap().symbol, "●");
+            }
+        }
+    }
+
+    #[test]
     fn header_paint_is_translated_and_clipped_to_its_child() {
         let app = App::new(KeybindingRegistry::default());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
@@ -1789,8 +1913,11 @@ mod tests {
         let app = App::new(KeybindingRegistry::default());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 12));
         let mut frame = Frame::new(&mut buffer);
+        let help = HelpComponent(&app);
+        let layout = help.layout(Constraints::tight(Size::new(24, 10)), &mut LayoutCx::new());
+        assert_eq!(layout.size, LogicalSize::new(24, 10));
         PaintCx::new(&mut frame).with_child(3, 2, LocalRect::new(0, 0, 7, 2), |cx| {
-            render_help(&app, cx, Rect::new(0, 0, 24, 10));
+            help.paint(&layout, cx);
         });
         drop(frame);
         assert_eq!(buffer.get(Point::new(7, 3)).unwrap().symbol, "K");
