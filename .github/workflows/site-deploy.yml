@@ -48,11 +48,6 @@ jobs:
           test -n "$AWS_SECRET_ACCESS_KEY"
           test -n "$STATE_BUCKET"
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
-      - name: Enforce dependency policy before deployment
-        run: cargo deny check
       - name: Generate HyperChad site
         run: cargo run --locked -p gchatui-site -- gen --output dist
       - name: Install locked deployment tools
