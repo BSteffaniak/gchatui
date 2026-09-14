@@ -6,6 +6,7 @@ pub mod auth_command;
 pub mod chat;
 mod config;
 pub mod credential;
+mod date_display;
 mod google_http;
 mod keybind;
 pub mod model;
@@ -35,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         let show_auth = access_token.is_none();
         let selection = app::run(
             config.keybindings.clone(),
+            config.clock_format,
             access_token.take(),
             aliases.clone(),
             show_auth,

@@ -11,6 +11,7 @@ repository  = "https://github.com/BSteffaniak/gchatui"
 version     = "0.1.0-alpha.1"
 
 [dependencies]
+chrono = { workspace = true }
 age = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }

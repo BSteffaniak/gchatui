@@ -1945,6 +1945,7 @@ dependencies = [
  "bmux_tui",
  "bmux_tui_components",
  "bmux_tui_runtime",
+ "chrono",
  "dirs",
  "futures-util",
  "rand 0.9.5",

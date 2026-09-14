@@ -39,6 +39,18 @@ tokens, screenshots, recordings, or diagnostic captures.
 `cargo run` still starts the desktop app. Use `--workspace` when checking all
 packages. Website deployment runs only through GitHub Actions, never locally.
 
+## Date and time display
+
+Message timestamps use your local timezone, for example `Sep 14, 2026 · 18:30`.
+Set the top-level option in your local `config.toml` and restart:
+
+```toml
+clock_format = "12h" # 6:30 PM; use "24h" (default) for 18:30
+```
+
+Dates remain explicit, seconds are omitted, and original timestamps are retained
+for ordering. Unrecognized timestamps are displayed unchanged.
+
 ## Development
 
 Install stable Rust, then run:

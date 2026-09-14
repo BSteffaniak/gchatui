@@ -9,6 +9,8 @@ use crate::keybind::{KeybindingError, KeybindingOverrides, KeybindingRegistry};
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
+    #[serde(default)]
+    clock_format: crate::date_display::ClockFormat,
     oauth_client_path: Option<PathBuf>,
     #[serde(default = "default_session_only")]
     session_only: bool,
@@ -27,6 +29,7 @@ const fn default_vault_passphrase() -> bool {
 }
 
 pub struct AppConfig {
+    pub clock_format: crate::date_display::ClockFormat,
     pub oauth_client_path: Option<PathBuf>,
     pub session_only: bool,
     pub vault_passphrase: bool,
@@ -52,6 +55,7 @@ pub enum ConfigError {
 pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     let Some(path) = path else {
         return Ok(AppConfig {
+            clock_format: crate::date_display::ClockFormat::default(),
             oauth_client_path: None,
             session_only: true,
             vault_passphrase: true,
@@ -60,6 +64,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     };
     if !path.exists() {
         return Ok(AppConfig {
+            clock_format: crate::date_display::ClockFormat::default(),
             oauth_client_path: None,
             session_only: true,
             vault_passphrase: true,
@@ -75,6 +80,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
         source,
     })?;
     Ok(AppConfig {
+        clock_format: config.clock_format,
         oauth_client_path: config.oauth_client_path,
         session_only: config.session_only,
         vault_passphrase: config.vault_passphrase,
@@ -137,6 +143,24 @@ mod tests {
     use super::*;
     use crate::keybind::Action;
     use tempfile::tempdir;
+
+    #[test]
+    fn clock_format_is_configurable_and_preserved_by_storage_changes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "clock_format = '12h'\n").unwrap();
+        assert!(matches!(
+            load(Some(&path)).unwrap().clock_format,
+            crate::date_display::ClockFormat::TwelveHour
+        ));
+        save_storage_choice(&path, false, true).unwrap();
+        assert!(matches!(
+            load(Some(&path)).unwrap().clock_format,
+            crate::date_display::ClockFormat::TwelveHour
+        ));
+        fs::write(&path, "clock_format = 'invalid'\n").unwrap();
+        assert!(load(Some(&path)).is_err());
+    }
 
     #[test]
     fn storage_choice_survives_reload_and_preserves_other_settings() {
