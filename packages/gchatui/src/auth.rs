@@ -82,11 +82,22 @@ impl AuthManager {
     }
 
     pub async fn access_token(&self) -> Result<Secret, AuthError> {
+        self.token_after_rejection(None).await
+    }
+
+    /// Refresh only if the rejected token is still current. A late 401 must not
+    /// invalidate the replacement obtained by another request.
+    pub async fn refresh_rejected_token(&self, rejected: &Secret) -> Result<Secret, AuthError> {
+        self.token_after_rejection(Some(rejected)).await
+    }
+
+    async fn token_after_rejection(&self, rejected: Option<&Secret>) -> Result<Secret, AuthError> {
         // The lock intentionally covers refresh. Concurrent callers queue here and
         // observe the single refreshed value rather than issuing duplicate grants.
         let mut guard = self.tokens.lock().await;
         if let Some(tokens) = guard.as_ref()
             && tokens.expires_at > Instant::now() + EXPIRY_SKEW
+            && rejected.is_none_or(|value| value.as_str() != tokens.access_token.as_str())
         {
             return Ok(Zeroizing::new(tokens.access_token.to_string()));
         }
@@ -173,6 +184,13 @@ mod tests {
             store,
         ));
         let (left, right) = tokio::join!(manager.access_token(), manager.access_token());
+        assert_eq!(left.unwrap().as_str(), "test");
+        assert_eq!(right.unwrap().as_str(), "test");
+        let rejected = Zeroizing::new("old-rejected-token".to_string());
+        let (left, right) = tokio::join!(
+            manager.refresh_rejected_token(&rejected),
+            manager.refresh_rejected_token(&rejected)
+        );
         assert_eq!(left.unwrap().as_str(), "test");
         assert_eq!(right.unwrap().as_str(), "test");
         server.await.unwrap();
