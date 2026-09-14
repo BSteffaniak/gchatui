@@ -93,6 +93,11 @@ pub struct App {
     conversation_pane: PaneState,
     conversation_view: VirtualListState<String>,
     help_button: ButtonState,
+    auth_button: ButtonState,
+    auth_menu: bool,
+    auth_selection: usize,
+    auth_options: [ButtonState; 3],
+    auth_result: Arc<std::sync::Mutex<Option<usize>>>,
     alias_picker: Option<AliasPicker>,
     alias_editor: Option<AliasEditor>,
     focused_pane: FocusedPane,
@@ -146,6 +151,11 @@ impl App {
             conversation_pane: PaneState::new(Rect::new(0, 0, 0, 0)),
             conversation_view: VirtualListState::new(0),
             help_button: ButtonState::new(),
+            auth_button: ButtonState::new(),
+            auth_menu: false,
+            auth_selection: 0,
+            auth_options: [ButtonState::new(); 3],
+            auth_result: Arc::new(std::sync::Mutex::new(None)),
             alias_picker: None,
             alias_editor: None,
             focused_pane: FocusedPane::Spaces,
@@ -293,6 +303,46 @@ impl App {
             TextInputOutcome::Ignored | TextInputOutcome::EdgeUp | TextInputOutcome::EdgeDown => {
                 Update::none()
             }
+        }
+    }
+
+    fn handle_auth_menu(&mut self, event: &Event) -> Update<AppMessage> {
+        if let Event::Key(stroke) = event {
+            match self.bindings.action_for(*stroke) {
+                Some(Action::Quit) => return self.apply_action(Action::Quit),
+                Some(Action::Cancel) => {
+                    self.auth_menu = false;
+                    return Update::reset();
+                }
+                Some(Action::MoveDown | Action::FocusNext) => {
+                    self.auth_selection = (self.auth_selection + 1) % 3;
+                }
+                Some(Action::MoveUp | Action::FocusPrevious) => {
+                    self.auth_selection = (self.auth_selection + 2) % 3;
+                }
+                Some(Action::Activate) => return self.choose_auth(self.auth_selection),
+                _ => {}
+            }
+            return Update::reset();
+        }
+        for (index, label) in STORAGE_OPTIONS.iter().enumerate() {
+            if Button::new(label).handle_event(
+                auth_option_area(self.conversation_pane.area, index),
+                &mut self.auth_options[index],
+                event,
+            ) == ButtonOutcome::Pressed
+            {
+                return self.choose_auth(index);
+            }
+        }
+        Update::reset()
+    }
+
+    fn choose_auth(&self, selection: usize) -> Update<AppMessage> {
+        *self.auth_result.lock().expect("auth result lock") = Some(selection);
+        Update {
+            lifecycle: Lifecycle::Exit,
+            ..Update::none()
         }
     }
 
@@ -466,6 +516,19 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn update_terminal(&mut self, event: Event) -> Update<AppMessage> {
+        if self.auth_menu {
+            return self.handle_auth_menu(&event);
+        }
+        if matches!(event, Event::Mouse(_))
+            && Button::new("Sign in / storage").handle_event(
+                auth_button_area(footer_area(self)),
+                &mut self.auth_button,
+                &event,
+            ) == ButtonOutcome::Pressed
+        {
+            self.auth_menu = true;
+            return Update::reset();
+        }
         if self.alias_picker.is_some() {
             if let Event::Key(stroke) = event
                 && self.bindings.action_for(stroke) == Some(Action::Cancel)
@@ -614,6 +677,10 @@ impl App {
                 lifecycle: Lifecycle::Exit,
                 ..Update::none()
             },
+            Action::Authenticate => {
+                self.auth_menu = true;
+                Update::reset()
+            }
             Action::SetSenderAlias => self.open_alias_editor(),
             Action::Refresh => self
                 .product
@@ -740,7 +807,9 @@ pub async fn run(
     bindings: KeybindingRegistry,
     access_token: Option<Secret>,
     aliases: Option<Arc<SenderAliases>>,
-) -> Result<()> {
+    show_auth: bool,
+) -> Result<Option<usize>> {
+    let auth_result = Arc::new(std::sync::Mutex::new(None));
     let mut guard = CrosstermTerminalGuard::enter(stdout())?;
     let result = {
         let writer = guard.writer_mut().expect("guard should own stdout");
@@ -755,6 +824,8 @@ pub async fn run(
         );
         let mut app = App::new(bindings);
         app.aliases = aliases;
+        app.auth_menu = show_auth;
+        app.auth_result = Arc::clone(&auth_result);
         let startup = access_token.map(|token| {
             app.access_token = Some(Arc::new(token));
         });
@@ -781,7 +852,9 @@ pub async fn run(
         }
     };
     let _stdout: Stdout = guard.leave()?;
-    result.map_err(Into::into)
+    result?;
+    let selected = *auth_result.lock().expect("auth result lock");
+    Ok(selected)
 }
 
 fn infer_direct_message_name(
@@ -1208,6 +1281,10 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         &ButtonComponent::new("help-button", "  ? HELP  ", &Cell::new(app.help_button))
             .styles(button_styles()),
     );
+    render_auth_button(app, frame);
+    if app.auth_menu {
+        render_auth_menu(app, frame);
+    }
     if app.alias_picker.is_some() {
         render_alias_picker(app, frame);
     }
@@ -1527,6 +1604,83 @@ fn alias_picker_content_area(area: Rect) -> Rect {
     )
 }
 
+const STORAGE_OPTIONS: [&str; 3] = [
+    "Sign in: session only (no saved token)",
+    "Sign in: encrypted vault with passphrase",
+    "Sign in: vault + unprotected identity (device risk)",
+];
+
+fn auth_button_area(footer: Rect) -> Rect {
+    Rect::new(footer.x, footer.y, footer.width.min(21), 1)
+}
+
+fn auth_option_area(area: Rect, index: usize) -> Rect {
+    let area = alias_picker_area(area);
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(2 + u16::try_from(index).unwrap_or(0)),
+        area.width.saturating_sub(2),
+        1,
+    )
+}
+
+fn render_auth_button(app: &App, frame: &mut Frame<'_>) {
+    paint_component(
+        frame,
+        auth_button_area(footer_area(app)),
+        &ButtonComponent::new(
+            "auth-button",
+            "Sign in / storage",
+            &Cell::new(app.auth_button),
+        )
+        .styles(button_styles()),
+    );
+}
+
+fn render_auth_menu(app: &App, frame: &mut Frame<'_>) {
+    let area = alias_picker_area(app.conversation_pane.area);
+    let title = format!(
+        "Sign in · {} selects · {} cancels",
+        app.bindings.labels_for(Action::Activate).join("/"),
+        app.bindings.labels_for(Action::Cancel).join("/")
+    );
+    let pane = Pane::new().title(Line::from(title)).styles(PaneStyles {
+        background: Some(Style::new().bg(SURFACE_RAISED)),
+        border: Style::new().fg(ACCENT),
+        focused_border: Style::new().fg(ACCENT),
+    });
+    paint_component(
+        frame,
+        area,
+        &PaneComponent::new(
+            "auth-menu",
+            pane,
+            &Cell::new(PaneState::new(area)),
+            EmptyComponent,
+        ),
+    );
+    for (index, label) in STORAGE_OPTIONS.iter().enumerate() {
+        let text = format!(
+            "{} {label}",
+            if app.auth_selection == index {
+                "→"
+            } else {
+                " "
+            }
+        );
+        paint_component(
+            frame,
+            auth_option_area(app.conversation_pane.area, index),
+            &ButtonComponent::new(
+                format!("auth-option-{index}"),
+                &text,
+                &Cell::new(app.auth_options[index]),
+            )
+            .styles(button_styles()),
+        );
+    }
+}
+
 fn render_alias_picker(app: &mut App, frame: &mut Frame<'_>) {
     let area = alias_picker_area(app.conversation_pane.area);
     let Some(picker) = app.alias_picker.as_mut() else {
@@ -1642,11 +1796,12 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
     editor.input = input_state.into_inner();
 }
 
-const HELP_ACTIONS: [Action; 6] = [
+const HELP_ACTIONS: [Action; 7] = [
     Action::FocusNext,
     Action::MoveDown,
     Action::Activate,
     Action::Refresh,
+    Action::Authenticate,
     Action::Help,
     Action::Quit,
 ];
@@ -2018,6 +2173,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn auth_menu_routes_registry_actions_and_cancel_without_credentials() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.apply_action(Action::Authenticate);
+        assert!(app.auth_menu);
+        let down = "Down".parse::<crate::keybind::KeyChord>().unwrap().stroke();
+        app.handle_auth_menu(&Event::Key(down));
+        assert_eq!(app.auth_selection, 1);
+        let activate = "Enter"
+            .parse::<crate::keybind::KeyChord>()
+            .unwrap()
+            .stroke();
+        let update = app.handle_auth_menu(&Event::Key(activate));
+        assert!(matches!(update.lifecycle, Lifecycle::Exit));
+        assert_eq!(*app.auth_result.lock().unwrap(), Some(1));
     }
 
     #[test]

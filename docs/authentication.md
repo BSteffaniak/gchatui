@@ -45,10 +45,19 @@ before new tokens are used or stored. Restart to authorize again after incomplet
 new consent. Session-only mode neither loads nor overwrites stored credentials.
 Workspace restrictions can still deny APIs after complete consent.
 
-Interactive storage selection and in-app reauthorization are not yet implemented.
-Persistent refresh failures currently return an error; for a fresh authorization
-without deleting credentials, temporarily use session-only mode. Do not imply
-that this workaround repairs or migrates the stored token.
+The TUI offers Sign in / storage through a footer button and the configurable
+`authenticate` action. When no token is available, it opens a storage menu with
+session-only, passphrase-protected vault, and explicitly unprotected-identity
+choices. Choices apply to this process; set local configuration explicitly to
+remember a startup storage preference across launches.
+
+Selecting a mode exits the current terminal runtime, restores the terminal for
+passphrase/browser authorization, then returns to a fresh TUI without restarting
+the process. Old runtime commands cannot update the new account's view. Existing
+stored credentials are not deleted on a failed sign-in. Persistent startup still
+uses the configured store and falls back to the menu on failure. Sign-in errors
+are printed outside the alternate screen; the menu is then available for retry.
+Authorization can wait up to three minutes for the browser callback.
 
 Do not share callback URLs, authorization codes, token output, or conversations.
 Verification demonstrations must use synthetic data. Cross-platform authorization

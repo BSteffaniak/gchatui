@@ -18,19 +18,44 @@ pub mod transcript_projection;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let path = config::default_config_path();
-    let config = config::load(path.as_deref())?;
-    let access_token = startup_access_token(&config).await?;
+    let mut config = config::load(path.as_deref())?;
+    let mut access_token = if config.session_only {
+        None
+    } else {
+        startup_access_token(&config, false).await.ok().flatten()
+    };
     let aliases = config::default_state_dir()
         .map(|state| {
             sender_alias::SenderAliases::load(config::sender_alias_path(&state))
                 .map(std::sync::Arc::new)
         })
         .transpose()?;
-    app::run(config.keybindings, access_token, aliases).await
+    loop {
+        let show_auth = access_token.is_none();
+        let selection = app::run(
+            config.keybindings.clone(),
+            access_token.take(),
+            aliases.clone(),
+            show_auth,
+        )
+        .await?;
+        let Some(selection) = selection else {
+            return Ok(());
+        };
+        config.session_only = selection == 0;
+        config.vault_passphrase = selection != 2;
+        match startup_access_token(&config, true).await {
+            Ok(token) => access_token = token,
+            Err(error) => eprintln!(
+                "Sign-in failed: {error}. Choose Sign in / storage to retry. Workspace policy may require administrator approval."
+            ),
+        }
+    }
 }
 
 async fn startup_access_token(
     config: &config::AppConfig,
+    reauthorize: bool,
 ) -> anyhow::Result<Option<credential::Secret>> {
     let client = oauth::resolve_client(config.oauth_client_path.as_deref())?;
     let store: std::sync::Arc<dyn credential::CredentialStore + Send + Sync> = if config
@@ -59,7 +84,11 @@ async fn startup_access_token(
             )?)
         }
     };
-    let manager = auth_command::ensure_client_authorized(client, store).await?;
+    let manager = if reauthorize {
+        auth_command::login_client(client, store).await?
+    } else {
+        auth_command::ensure_client_authorized(client, store).await?
+    };
     let token = manager.access_token().await?;
     Ok(Some(token))
 }

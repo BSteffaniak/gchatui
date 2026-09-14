@@ -57,7 +57,7 @@ pub async fn login(
     login_client(client, credentials).await
 }
 
-async fn login_client(
+pub async fn login_client(
     client: crate::oauth::InstalledClient,
     credentials: Arc<dyn CredentialStore + Send + Sync>,
 ) -> Result<Arc<AuthManager>, AuthCommandError> {
