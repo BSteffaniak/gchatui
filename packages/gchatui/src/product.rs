@@ -54,6 +54,7 @@ pub struct ProductState {
     pub messages: Vec<Message>,
     pub selected_space: Option<String>,
     pub next_message_page: Option<PageToken>,
+    names_request: Option<RequestId>,
     next_request_id: RequestId,
     active_spaces_request: Option<RequestId>,
     active_messages_request: Option<(RequestId, String)>,
@@ -70,6 +71,7 @@ impl Default for ProductState {
             messages: Vec::new(),
             selected_space: None,
             next_message_page: None,
+            names_request: None,
             next_request_id: 1,
             active_spaces_request: None,
             active_messages_request: None,
@@ -78,6 +80,29 @@ impl Default for ProductState {
 }
 
 impl ProductState {
+    pub fn apply_names(
+        &mut self,
+        request_id: RequestId,
+        space: &str,
+        incoming: &[Message],
+    ) -> bool {
+        if self.names_request != Some(request_id)
+            || self.selected_space.as_deref() != Some(space)
+            || self.active_messages_request.is_some()
+        {
+            return false;
+        }
+        for message in &mut self.messages {
+            if let Some(resolved) = incoming.iter().find(|other| other.id == message.id)
+                && let (Some(sender), Some(named)) = (&mut message.sender, &resolved.sender)
+                && sender.resource_name == named.resource_name
+            {
+                sender.display_name.clone_from(&named.display_name);
+            }
+        }
+        true
+    }
+
     pub fn observe_activity(&mut self, space: &str, latest: Option<&crate::model::MessageId>) {
         if let Some(previous) = self
             .activity_baselines
@@ -135,6 +160,7 @@ impl ProductState {
     pub fn select_space(&mut self, space_name: String) -> Effect {
         let request_id = self.allocate_request_id();
         self.selected_space = Some(space_name.clone());
+        self.names_request = None;
         self.messages.clear();
         self.next_message_page = None;
         self.active_messages_request = Some((request_id, space_name.clone()));
@@ -230,6 +256,7 @@ impl ProductState {
                 self.active_messages_request = None;
                 match result {
                     Ok((messages, next_page)) => {
+                        self.names_request = Some(request_id);
                         // Opening an unchecked space must not promote it above
                         // spaces the activity sweep has not observed yet.
                         if let Some(latest) = messages.last()
@@ -291,6 +318,47 @@ mod tests {
         state.reconcile_spaces(vec![space("unknown"), space("a"), space("b")]);
         assert_eq!(state.spaces[0].id.0, "b");
         assert_eq!(state.spaces[2].id.0, "unknown");
+    }
+
+    #[test]
+    fn names_do_not_replace_content_or_cross_selections() {
+        let mut state = ProductState::default();
+        let Effect::LoadMessages {
+            request_id,
+            space_name,
+            ..
+        } = state.select_space("one".into())
+        else {
+            unreachable!()
+        };
+        let mut original = message("m", "1");
+        original.sender = Some(crate::model::Sender {
+            resource_name: "users/synthetic".into(),
+            display_name: None,
+            kind: crate::model::SenderKind::Human,
+        });
+        state.update(ProductMessage::MessagesLoaded {
+            request_id,
+            space_name,
+            result: Ok((vec![original.clone()], None)),
+        });
+        let mut named = original.clone();
+        named.text = "must not replace content".into();
+        named.sender.as_mut().unwrap().display_name = Some("Example Person".into());
+        assert!(state.apply_names(request_id, "one", &[named.clone()]));
+        assert_eq!(state.messages[0].text, original.text);
+        assert_eq!(
+            state.messages[0]
+                .sender
+                .as_ref()
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Example Person")
+        );
+        state.select_space("two".into());
+        assert!(!state.apply_names(request_id, "one", &[named]));
+        assert!(state.messages.is_empty());
     }
 
     #[test]

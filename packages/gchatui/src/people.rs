@@ -37,6 +37,7 @@ pub struct PeopleClient {
     base_url: Url,
     directory: tokio::sync::Mutex<Option<Arc<BTreeMap<String, String>>>>,
     current_user: tokio::sync::Mutex<Option<Arc<CurrentUser>>>,
+    contacts_cache: tokio::sync::Mutex<Option<BTreeMap<String, String>>>,
     contacts_enabled: bool,
 }
 
@@ -54,6 +55,7 @@ impl PeopleClient {
             base_url: Url::parse(PEOPLE_API).expect("static People API URL should be valid"),
             directory: tokio::sync::Mutex::new(None),
             current_user: tokio::sync::Mutex::new(None),
+            contacts_cache: tokio::sync::Mutex::new(None),
             contacts_enabled: true,
         }
     }
@@ -71,6 +73,7 @@ impl PeopleClient {
             base_url,
             directory: tokio::sync::Mutex::new(Some(Arc::new(BTreeMap::new()))),
             current_user: tokio::sync::Mutex::new(None),
+            contacts_cache: tokio::sync::Mutex::new(None),
             contacts_enabled: false,
         }
     }
@@ -82,6 +85,7 @@ impl PeopleClient {
             base_url,
             directory: tokio::sync::Mutex::new(None),
             current_user: tokio::sync::Mutex::new(None),
+            contacts_cache: tokio::sync::Mutex::new(None),
             contacts_enabled: false,
         }
     }
@@ -97,6 +101,7 @@ impl PeopleClient {
                 resource_names: BTreeSet::from([resource_name.to_string()]),
                 display_name: Some("Me".to_string()),
             }))),
+            contacts_cache: tokio::sync::Mutex::new(None),
             contacts_enabled: false,
         }
     }
@@ -277,6 +282,10 @@ impl PeopleClient {
         &self,
         access_token: &Zeroizing<String>,
     ) -> Result<BTreeMap<String, String>, PeopleError> {
+        let mut cache = self.contacts_cache.lock().await;
+        if let Some(index) = cache.as_ref() {
+            return Ok(index.clone());
+        }
         let mut index = BTreeMap::new();
         let mut page_token = None;
         loop {
@@ -313,6 +322,8 @@ impl PeopleClient {
                 break;
             }
         }
+        *cache = Some(index.clone());
+        drop(cache);
         Ok(index)
     }
 

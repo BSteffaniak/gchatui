@@ -72,6 +72,12 @@ pub enum AppMessage {
         message: ProductMessage,
         current_user: Option<(std::collections::BTreeSet<String>, Option<String>)>,
     },
+    NamesResolved {
+        current_user: Option<(std::collections::BTreeSet<String>, Option<String>)>,
+        request_id: u64,
+        space_name: String,
+        messages: Vec<crate::model::Message>,
+    },
     Poll,
     Sweep,
     SweepFinished {
@@ -243,6 +249,63 @@ impl App {
         ))
     }
 
+    fn apply_product_message(&mut self, message: ProductMessage) -> Update<AppMessage> {
+        let messages_loaded = matches!(message, ProductMessage::MessagesLoaded { .. });
+        if !self.product.accepts(&message) {
+            return Update::none();
+        }
+        let was_poll = matches!(&message, ProductMessage::MessagesLoaded { request_id, .. } if self.polling == Some(*request_id));
+        let previous = self.product.messages.clone();
+        self.product.update(message);
+        if was_poll {
+            self.poll_interval = if self.product.messages != previous || self.poll_interval < 5 {
+                5
+            } else {
+                (self.poll_interval * 2).min(60)
+            };
+            self.product.next_message_page = self.poll_page.take();
+            self.polling = None;
+        }
+        apply_sender_aliases(self);
+        self.rebuild_projections();
+        if !was_poll && messages_loaded && matches!(self.product.phase, Phase::Ready | Phase::Empty)
+        {
+            self.follow_conversation_bottom = true;
+        }
+        sync_space_selection(self);
+        Update::reset()
+    }
+
+    fn enrich_message(&self, message: &ProductMessage) -> Option<Command<AppMessage>> {
+        let ProductMessage::MessagesLoaded {
+            request_id,
+            space_name,
+            result: Ok((messages, _)),
+        } = message
+        else {
+            return None;
+        };
+        let (request_id, space_name, mut messages) =
+            (*request_id, space_name.clone(), messages.clone());
+        let people = Arc::clone(&self.people);
+        let token = self.access_token.clone()?;
+        Some(Command::replace(
+            CommandKey::new("sender-names"),
+            async move {
+                let _ = people
+                    .resolve_message_senders(token.as_ref(), &mut messages)
+                    .await;
+                let current_user = people.current_user(token.as_ref()).await.ok();
+                Some(AppMessage::NamesResolved {
+                    current_user,
+                    request_id,
+                    space_name,
+                    messages,
+                })
+            },
+        ))
+    }
+
     fn command_for_effect(&self, effect: Effect) -> Option<Command<AppMessage>> {
         let token = self.access_token.clone()?;
         let chat = Arc::clone(&self.chat);
@@ -293,18 +356,13 @@ impl App {
                         }));
                     }
                 };
-                let mut messages = page.items;
-                let _ = people
-                    .resolve_message_senders(token.as_ref(), &mut messages)
-                    .await;
-                let current_user = people.current_user(token.as_ref()).await.ok();
                 Some(AppMessage::MessagesWithIdentity {
                     message: ProductMessage::MessagesLoaded {
                         request_id,
                         space_name,
-                        result: Ok((messages, page.next_page_token)),
+                        result: Ok((page.items, page.next_page_token)),
                     },
-                    current_user,
+                    current_user: None,
                 })
             })),
         }
@@ -876,6 +934,7 @@ impl Program for App {
                     return Ok(Update::none());
                 }
                 let was_poll = matches!(&message, ProductMessage::MessagesLoaded { request_id, .. } if self.polling == Some(*request_id));
+                let enrichment = self.enrich_message(&message);
                 let previous = self.product.messages.clone();
                 self.product.update(message);
                 if was_poll {
@@ -895,36 +954,26 @@ impl Program for App {
                     self.follow_conversation_bottom = true;
                 }
                 sync_space_selection(self);
-                Ok(Update::reset())
+                Ok(enrichment.map_or_else(Update::reset, |command| {
+                    Update::reset().with_command(command)
+                }))
             }
-            RuntimeEvent::Message(AppMessage::Product(message)) => {
-                let messages_loaded = matches!(message, ProductMessage::MessagesLoaded { .. });
-                if !self.product.accepts(&message) {
+            RuntimeEvent::Message(AppMessage::NamesResolved {
+                current_user,
+                request_id,
+                space_name,
+                messages,
+            }) => {
+                if !self.product.apply_names(request_id, &space_name, &messages) {
                     return Ok(Update::none());
                 }
-                let was_poll = matches!(&message, ProductMessage::MessagesLoaded { request_id, .. } if self.polling == Some(*request_id));
-                let previous = self.product.messages.clone();
-                self.product.update(message);
-                if was_poll {
-                    self.poll_interval =
-                        if self.product.messages != previous || self.poll_interval < 5 {
-                            5
-                        } else {
-                            (self.poll_interval * 2).min(60)
-                        };
-                    self.product.next_message_page = self.poll_page.take();
-                    self.polling = None;
-                }
+                infer_direct_message_name(self, current_user.as_ref());
                 apply_sender_aliases(self);
                 self.rebuild_projections();
-                if !was_poll
-                    && messages_loaded
-                    && matches!(self.product.phase, Phase::Ready | Phase::Empty)
-                {
-                    self.follow_conversation_bottom = true;
-                }
-                sync_space_selection(self);
-                Ok(Update::reset())
+                Ok(Update::redraw())
+            }
+            RuntimeEvent::Message(AppMessage::Product(message)) => {
+                Ok(self.apply_product_message(message))
             }
             RuntimeEvent::Message(AppMessage::InputError(error)) => Err(error),
             RuntimeEvent::Timer(_) => Ok(Update::none()),
