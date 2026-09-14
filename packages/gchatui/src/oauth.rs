@@ -368,6 +368,22 @@ fn validate_granted_scopes(scopes: &str) -> Result<(), OAuthError> {
     }
 }
 
+pub fn resolve_client(path: Option<&Path>) -> Result<InstalledClient, OAuthError> {
+    path.map_or_else(
+        || {
+            Ok(InstalledClient {
+                client_id: crate::official_oauth::CLIENT_ID.to_string(),
+                client_secret: Zeroizing::new(
+                    crate::official_oauth::DESKTOP_CLIENT_VALUE.to_string(),
+                ),
+                auth_uri: AUTH_ENDPOINT.to_string(),
+                token_uri: TOKEN_ENDPOINT.to_string(),
+            })
+        },
+        load_desktop_client,
+    )
+}
+
 pub fn load_desktop_client(path: &Path) -> Result<InstalledClient, OAuthError> {
     let contents = fs::read_to_string(path).map_err(|_| OAuthError::Read {
         path: path.to_path_buf(),
@@ -676,6 +692,16 @@ mod tests {
             Err(OAuthError::MissingPermissions)
         ));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn official_client_is_default_and_invalid_override_never_falls_back() {
+        let official = resolve_client(None).unwrap();
+        assert_eq!(official.auth_uri, AUTH_ENDPOINT);
+        assert_eq!(official.token_uri, TOKEN_ENDPOINT);
+        assert!(!official.client_id.is_empty());
+        let directory = tempfile::tempdir().unwrap();
+        assert!(resolve_client(Some(&directory.path().join("missing"))).is_err());
     }
 
     #[test]

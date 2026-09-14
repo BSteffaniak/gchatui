@@ -393,6 +393,13 @@ fn remove_if_present(path: &Path) -> Result<(), CredentialError> {
 }
 
 #[must_use]
+pub fn client_auth_state_paths(state_root: &Path, client_id: &str) -> (PathBuf, PathBuf) {
+    use sha2::{Digest, Sha256};
+    let fingerprint = format!("{:x}", Sha256::digest(client_id.as_bytes()));
+    auth_state_paths(&state_root.join("oauth-clients").join(fingerprint))
+}
+
+#[must_use]
 pub fn auth_state_paths(state_root: &Path) -> (PathBuf, PathBuf) {
     (state_root.join("auth.vault"), state_root.join("identity"))
 }
@@ -402,6 +409,28 @@ mod tests {
     use super::*;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn client_namespaces_do_not_reuse_legacy_or_other_client_credentials() {
+        let directory = tempdir().unwrap();
+        let first = client_auth_state_paths(directory.path(), "synthetic-client-a");
+        let second = client_auth_state_paths(directory.path(), "synthetic-client-b");
+        assert_ne!(first, second);
+        assert_ne!(first, auth_state_paths(directory.path()));
+        assert_eq!(
+            first,
+            client_auth_state_paths(directory.path(), "synthetic-client-a")
+        );
+        assert!(first.0.starts_with(directory.path()));
+        assert!(!first.0.to_string_lossy().contains("synthetic-client-a"));
+        let store = SshenvCredentialStore::bootstrap_unencrypted(&first.0, &first.1).unwrap();
+        store
+            .save_refresh_token(Zeroizing::new("synthetic-token".to_string()))
+            .unwrap();
+        let other = SshenvCredentialStore::bootstrap_unencrypted(&second.0, &second.1).unwrap();
+        assert!(other.load_refresh_token().unwrap().is_none());
+        assert!(store.load_refresh_token().unwrap().is_some());
+    }
 
     #[test]
     fn unencrypted_identity_enables_prompt_free_persistent_lifecycle() {

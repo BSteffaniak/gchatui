@@ -1,37 +1,55 @@
 # Authentication
 
-The first release uses Google installed-app OAuth with a user-provided desktop
-client configuration and only the read-only scopes required to list spaces,
-messages, and resolve sender names through the Workspace directory.
+The desktop application defaults to the approved official Google Desktop OAuth
+client. Set `oauth_client_path` only to override it with a private Desktop client
+file. Invalid overrides fail rather than falling back to a different client.
+All six existing scopes are retained. Google verification and Workspace policy
+still determine who can authorize; bundling a client does not establish approval.
 
-- Access tokens remain in protected process memory.
-- Persistent mode stores the refresh token in an app-specific encrypted sshenv
-  vault. By default, a passphrase protects the generated app identity.
-- Setting `vault_passphrase = false` opts into prompt-free persistent startup. The
-  vault remains encrypted, but the app identity is protected only by current-user
-  filesystem permissions; copying both state files permits token recovery.
-- Session-only mode writes no token or generated identity to disk.
-- Plaintext persistence is never an automatic fallback.
-- Logout attempts remote revocation and removes local authorization according to
-  explicit user intent.
+## Public application metadata
 
-OAuth client files, authorization codes, tokens, private keys, and callback payloads
-must never enter source control, logs, fixtures, diagnostics, or release archives.
+The official client ID and generated Desktop client value are public native-app
+metadata in `packages/gchatui/src/official_oauth.rs`. They are not user credentials
+and cannot be treated as confidential in a distributed executable. The same
+existing Google exchange/refresh protocol is retained, including the generated
+value; client-ID-only support is not assumed. PKCE and state validation remain
+required. This exception does not cover Web secrets, tokens, private keys, or the
+downloaded JSON. The public-safety guard limits these exact values to their module.
 
-## Partial consent
+## Local storage
 
-Select all requested permissions on Google's consent screen. gchatui checks scopes
-reported in the callback and token responses, and rejects explicit partial grants
-before using or persisting the new tokens. If Google omits scope information, OAuth
-semantics retain the requested/original grant; this is not independent inspection
-of an older stored token's permissions. Workspace restrictions can still cause API
-access failures even after complete consent.
+New configurations default to `session_only = true`. No token or vault identity is
+persisted in this mode. Existing explicit settings remain honored. To opt into
+persistent authorization, set these top-level local config values:
 
-For an incomplete new grant, restart gchatui and authorize all permissions. With
-`session_only = true`, no prior persisted refresh token is loaded or overwritten.
-Do not switch desktop clients with persistent mode enabled until client-bound
-credential storage is implemented; the current vault is not client-specific.
+```toml
+session_only = false
+vault_passphrase = true
+```
 
-The [official-client rollout](official-oauth-rollout.md) records the distribution
-and verification gates. The private client-file configuration remains required
-until those gates are complete.
+Persistent refresh tokens are encrypted in an app-specific sshenv vault. Setting
+`vault_passphrase = false` explicitly opts into filesystem-permission protection
+for the generated identity: copying both identity and vault permits token recovery.
+There is no automatic plaintext fallback.
+
+Credentials now live under the platform state directory at
+`oauth-clients/<SHA-256-of-client-ID>/auth.vault` and `identity`. Changing clients
+selects another namespace. The old unscoped vault is left untouched and never
+silently migrated or reused; existing persistent users must sign in once again.
+The app never reads or changes a global sshenv vault.
+
+## Consent and remaining onboarding work
+
+Select all requested Google permissions. Explicit partial grants are rejected
+before new tokens are used or stored. Restart to authorize again after incomplete
+new consent. Session-only mode neither loads nor overwrites stored credentials.
+Workspace restrictions can still deny APIs after complete consent.
+
+Interactive storage selection and in-app reauthorization are not yet implemented.
+Persistent refresh failures currently return an error; for a fresh authorization
+without deleting credentials, temporarily use session-only mode. Do not imply
+that this workaround repairs or migrates the stored token.
+
+Do not share callback URLs, authorization codes, token output, or conversations.
+Verification demonstrations must use synthetic data. Cross-platform authorization
+and the full onboarding experience remain release gates.

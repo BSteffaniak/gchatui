@@ -27,9 +27,16 @@ pub async fn ensure_authorized(
     credentials: Arc<dyn CredentialStore + Send + Sync>,
 ) -> Result<Arc<AuthManager>, AuthCommandError> {
     let client = load_desktop_client(client_path)?;
-    let manager = Arc::new(AuthManager::new(client, Arc::clone(&credentials)));
+    ensure_client_authorized(client, credentials).await
+}
+
+pub async fn ensure_client_authorized(
+    client: crate::oauth::InstalledClient,
+    credentials: Arc<dyn CredentialStore + Send + Sync>,
+) -> Result<Arc<AuthManager>, AuthCommandError> {
+    let manager = Arc::new(AuthManager::new(client.clone(), Arc::clone(&credentials)));
     match manager.status().await? {
-        AuthStatus::SignedOut => login(client_path, credentials, None).await,
+        AuthStatus::SignedOut => login_client(client, credentials).await,
         AuthStatus::Authorized | AuthStatus::Expiring => {
             manager.access_token().await?;
             Ok(manager)
@@ -47,6 +54,13 @@ pub async fn login(
     // prevents hidden environment or argument fallbacks.
     drop(passphrase);
     let client = load_desktop_client(client_path)?;
+    login_client(client, credentials).await
+}
+
+async fn login_client(
+    client: crate::oauth::InstalledClient,
+    credentials: Arc<dyn CredentialStore + Send + Sync>,
+) -> Result<Arc<AuthManager>, AuthCommandError> {
     let callback = LoopbackCallback::bind().await?;
     let request = authorization_request(&client, callback.redirect_uri())?;
     if open_browser(&request.url).is_err() {

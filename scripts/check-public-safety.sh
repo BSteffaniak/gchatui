@@ -16,6 +16,28 @@ fi
 
 status=0
 
+# Public native-client values are allowed only in their explicitly owned module.
+python3 - <<'PY'
+from pathlib import Path
+import re
+import subprocess
+source = Path('packages/gchatui/src/official_oauth.rs')
+if source.exists():
+    values = re.findall(r'pub const (?:CLIENT_ID|DESKTOP_CLIENT_VALUE): &str =\s*"([^"]+)";', source.read_text())
+    if len(values) != 2:
+        raise SystemExit('public-safety: invalid official client metadata module')
+    paths = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z']).split(b'\0')
+    for raw in paths:
+        if not raw:
+            continue
+        path = Path(raw.decode())
+        if path == source or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if any(value.encode() in data for value in values):
+            raise SystemExit('public-safety: official client metadata outside approved module')
+PY
+
 if rg --line-number --ignore-case \
   --glob '!scripts/check-public-safety.sh' \
   --glob '!packages/gchatui/src/**/*test*' \

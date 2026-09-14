@@ -10,12 +10,16 @@ use crate::keybind::{KeybindingError, KeybindingOverrides, KeybindingRegistry};
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     oauth_client_path: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default = "default_session_only")]
     session_only: bool,
     #[serde(default = "default_vault_passphrase")]
     vault_passphrase: bool,
     #[serde(default)]
     keybindings: KeybindingOverrides,
+}
+
+const fn default_session_only() -> bool {
+    true
 }
 
 const fn default_vault_passphrase() -> bool {
@@ -49,7 +53,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     let Some(path) = path else {
         return Ok(AppConfig {
             oauth_client_path: None,
-            session_only: false,
+            session_only: true,
             vault_passphrase: true,
             keybindings: KeybindingRegistry::default(),
         });
@@ -57,7 +61,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     if !path.exists() {
         return Ok(AppConfig {
             oauth_client_path: None,
-            session_only: false,
+            session_only: true,
             vault_passphrase: true,
             keybindings: KeybindingRegistry::default(),
         });

@@ -16,6 +16,12 @@ These are acceptance criteria for every valid change.
   contact in `packages/site/src/main.rs`, including its generated website output.
   Mechanical guards may identify that exact contact to enforce this exception.
   This does not permit other real accounts, private identifiers, or credentials.
+- **The official Desktop OAuth client is public application metadata.** The approved
+  client ID and Google-generated Desktop client value may be distributed only in
+  `packages/gchatui/src/official_oauth.rs` and compiled desktop artifacts. They
+  cannot authenticate a user without that user's authorization. This exception
+  does not cover Web client secrets, downloaded JSON, user tokens, authorization
+  codes, private keys, or other accounts. PKCE and state validation remain required.
 
 ## Architecture
 
