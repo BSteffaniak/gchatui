@@ -21,15 +21,9 @@ terraform {
   }
 }
 
-provider "cloudflare" {
-  api_token = trimspace(file(var.cloudflare_api_token_file))
-}
+provider "cloudflare" {}
 
-variable "cloudflare_api_token_file" {
-  description = "Absolute path to a private file containing the Cloudflare API token."
-  type        = string
-  sensitive   = true
-}
+# Cloudflare reads CLOUDFLARE_API_TOKEN from the deployment job environment.
 
 variable "cloudflare_zone_id" {
   description = "Existing bmux.dev zone ID, supplied through private local configuration."

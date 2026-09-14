@@ -1,4 +1,6 @@
 /target/
+**/node_modules/
+**/.wrangler/
 /dist/
 /.direnv/
 /.codeql/

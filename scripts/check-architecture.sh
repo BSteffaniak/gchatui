@@ -8,7 +8,7 @@ status=0
 rust_files=()
 while IFS= read -r file; do
   rust_files+=("$file")
-done < <(find src -type f -name '*.rs' ! -name 'keybind.rs' ! -path '*/keybind/*' -print)
+done < <(find packages/gchatui/src -type f -name '*.rs' ! -name 'keybind.rs' ! -path '*/keybind/*' -print)
 
 if ((${#rust_files[@]} > 0)); then
   if rg --line-number \
@@ -19,7 +19,7 @@ if ((${#rust_files[@]} > 0)); then
   fi
 fi
 
-if find . -path ./target -prune -o -type d \( -name common -o -name shared -o -name core \) -print | grep -q .; then
+if find packages \( -name target -o -name node_modules -o -name .wrangler \) -prune -o -type d \( -name common -o -name shared -o -name core \) -print | grep -q .; then
   echo "architecture: vague common/shared/core ownership directory found" >&2
   status=1
 fi

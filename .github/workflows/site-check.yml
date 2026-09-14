@@ -1,0 +1,19 @@
+name: Check Website
+on:
+  pull_request:
+    paths: ['packages/site/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/site-check.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cargo run --locked -p gchatui-site -- gen --output dist
+      - run: npm --prefix packages/site ci
+      - run: npm --prefix packages/site test

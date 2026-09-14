@@ -1,0 +1,43 @@
+[package]
+categories  = ["command-line-utilities"]
+description = "A mouse- and keyboard-friendly Google Chat terminal client"
+edition     = "2024"
+keywords    = ["chat", "google-chat", "terminal", "tui"]
+license     = "MPL-2.0"
+name        = "gchatui"
+publish     = false
+readme      = "../../README.md"
+repository  = "https://github.com/BSteffaniak/gchatui"
+version     = "0.1.0-alpha.1"
+
+[dependencies]
+age = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+bmux_keyboard = { workspace = true }
+bmux_text_edit = { workspace = true }
+bmux_tui = { workspace = true }
+bmux_tui_components = { workspace = true }
+bmux_tui_runtime = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+rpassword = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+ssh-key = { workspace = true }
+sshenv_vault = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+url = { workspace = true }
+webbrowser = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

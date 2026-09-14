@@ -1,0 +1,11 @@
+{
+  "name": "gchatui-site",
+  "private": true,
+  "scripts": {
+    "test": "node --test test.mjs",
+    "deploy": "node deploy.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.131.2"
+  }
+}

@@ -6,7 +6,7 @@ cd "$root"
 
 files=()
 while IFS= read -r file; do
-  files+=("$file")
+  [[ -f "$file" ]] && files+=("$file")
 done < <(git ls-files --cached --others --exclude-standard)
 
 if ((${#files[@]} == 0)); then
@@ -18,7 +18,7 @@ status=0
 
 if rg --line-number --ignore-case \
   --glob '!scripts/check-public-safety.sh' \
-  --glob '!src/**/*test*' \
+  --glob '!packages/gchatui/src/**/*test*' \
   --glob '!tests/**' \
   '(refresh[_ -]?token|access[_ -]?token|client[_ -]?secret|authorization)["'\'']?[[:space:]]*:[[:space:]]*["'\''][A-Za-z0-9_./+==-]{8,}' \
   "${files[@]}"; then

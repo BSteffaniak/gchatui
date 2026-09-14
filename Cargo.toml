@@ -1,16 +1,13 @@
-[package]
-categories  = ["command-line-utilities"]
-description = "A mouse- and keyboard-friendly Google Chat terminal client"
-edition     = "2024"
-keywords    = ["chat", "google-chat", "terminal", "tui"]
-license     = "MPL-2.0"
-name        = "gchatui"
-publish     = false
-readme      = "README.md"
-repository  = "https://github.com/BSteffaniak/gchatui"
-version     = "0.1.0-alpha.1"
+[workspace]
+default-members = ["packages/gchatui"]
+members         = ["packages/gchatui", "packages/site"]
+resolver        = "3"
 
-[dependencies]
+[workspace.dependencies]
+hyperchad = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+switchy   = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+
+
 age = { version = "0.12", features = ["ssh"] }
 anyhow = "1.0"
 base64 = "0.22"
@@ -53,10 +50,10 @@ url = "2.0"
 webbrowser = "1.0"
 zeroize = "1.0"
 
-[dev-dependencies]
+
 tempfile = "3.0"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all                     = { level = "warn", priority = -1 }
 cargo                   = { level = "warn", priority = -1 }
 cargo_common_metadata   = "allow"
@@ -66,5 +63,5 @@ multiple_crate_versions = "allow"
 nursery                 = { level = "warn", priority = -1 }
 pedantic                = { level = "warn", priority = -1 }
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"

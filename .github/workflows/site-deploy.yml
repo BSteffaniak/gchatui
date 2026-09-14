@@ -1,0 +1,82 @@
+name: Deploy Website
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'packages/site/**'
+      - 'infra/cloudflare/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/site-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gchatui-site-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
+      STATE_BUCKET: ${{ vars.R2_STATE_BUCKET }}
+      TF_IN_AUTOMATION: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.11.0
+      - name: Check deployment configuration
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$TF_VAR_cloudflare_zone_id"
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+          test -n "$STATE_BUCKET"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Enforce dependency policy before deployment
+        run: cargo deny check
+      - name: Generate HyperChad site
+        run: cargo run --locked -p gchatui-site -- gen --output dist
+      - name: Install locked deployment tools
+        working-directory: packages/site
+        run: npm ci
+      - name: Validate static assets
+        working-directory: packages/site
+        run: npm test
+      - name: Deploy static assets before installing route
+        working-directory: packages/site
+        run: npm run deploy
+      - name: Initialize infrastructure
+        working-directory: infra/cloudflare
+        run: |
+          tofu init -input=false -lockfile=readonly \
+            -backend-config="bucket=$STATE_BUCKET" \
+            -backend-config="endpoints={s3=\"https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com\"}"
+          tofu validate
+      - name: Plan and apply infrastructure
+        working-directory: infra/cloudflare
+        run: |
+          tofu plan -input=false -out="$RUNNER_TEMP/site.tfplan"
+          tofu apply -input=false "$RUNNER_TEMP/site.tfplan"
+      - name: Check public pages
+        run: |
+          curl --fail --silent --show-error --retry 8 --retry-all-errors --retry-delay 10 https://gchatui.bmux.dev/ > /dev/null
+          curl --fail --silent --show-error --retry 8 --retry-all-errors --retry-delay 10 https://gchatui.bmux.dev/privacy > /dev/null

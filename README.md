@@ -30,6 +30,15 @@ Repository content uses synthetic examples only. Do not add real account details
 workspace names, conversation content, private identifiers, OAuth credentials,
 tokens, screenshots, recordings, or diagnostic captures.
 
+## Workspace
+
+- `packages/gchatui`: desktop terminal application (default Cargo member).
+- `packages/site`: HyperChad static website, built separately for GitHub deployment.
+- Root `Cargo.toml`: shared dependencies and workspace configuration; one lockfile.
+
+`cargo run` still starts the desktop app. Use `--workspace` when checking all
+packages. Website deployment runs only through GitHub Actions, never locally.
+
 ## Development
 
 Install stable Rust, then run:

@@ -1,0 +1,10 @@
+[package]
+name = "gchatui-site"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+hyperchad = { workspace = true, features = ["app", "color", "renderer", "router", "template", "transformer", "transformer-models", "renderer-html", "renderer-html-actix", "renderer-assets", "router-static-routes"] }
+switchy = { workspace = true, features = ["async", "async-tokio"] }
