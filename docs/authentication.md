@@ -17,5 +17,21 @@ messages, and resolve sender names through the Workspace directory.
 
 OAuth client files, authorization codes, tokens, private keys, and callback payloads
 must never enter source control, logs, fixtures, diagnostics, or release archives.
-Implementation details will be added after the credential and OAuth spikes are
-validated.
+
+## Partial consent
+
+Select all requested permissions on Google's consent screen. gchatui checks scopes
+reported in the callback and token responses, and rejects explicit partial grants
+before using or persisting the new tokens. If Google omits scope information, OAuth
+semantics retain the requested/original grant; this is not independent inspection
+of an older stored token's permissions. Workspace restrictions can still cause API
+access failures even after complete consent.
+
+For an incomplete new grant, restart gchatui and authorize all permissions. With
+`session_only = true`, no prior persisted refresh token is loaded or overwritten.
+Do not switch desktop clients with persistent mode enabled until client-bound
+credential storage is implemented; the current vault is not client-specific.
+
+The [official-client rollout](official-oauth-rollout.md) records the distribution
+and verification gates. The private client-file configuration remains required
+until those gates are complete.

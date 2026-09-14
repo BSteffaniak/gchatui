@@ -24,6 +24,14 @@ pub const CONTACTS_READONLY: &str = "https://www.googleapis.com/auth/contacts.re
 pub const USERINFO_PROFILE: &str = "https://www.googleapis.com/auth/userinfo.profile";
 pub const CHAT_MEMBERSHIPS_READONLY: &str =
     "https://www.googleapis.com/auth/chat.memberships.readonly";
+pub const REQUIRED_SCOPES: [&str; 6] = [
+    CHAT_SPACES_READONLY,
+    CHAT_MESSAGES_READONLY,
+    DIRECTORY_READONLY,
+    CONTACTS_READONLY,
+    CHAT_MEMBERSHIPS_READONLY,
+    USERINFO_PROFILE,
+];
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const LEGACY_AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
@@ -80,6 +88,10 @@ pub enum OAuthError {
     CallbackListener,
     #[error("OAuth browser could not be opened; open the displayed URL manually")]
     BrowserLaunch,
+    #[error(
+        "Google did not grant all required permissions. Restart gchatui and select all requested permissions on Google's consent screen; your organization may require administrator approval."
+    )]
+    MissingPermissions,
     #[error("OAuth token request failed")]
     TokenRequest,
     #[error("OAuth token response was malformed")]
@@ -137,8 +149,13 @@ impl LoopbackCallback {
                     .ok_or(OAuthError::CallbackListener)?;
                 let redirect = Url::parse(&format!("{}{}", self.redirect_uri.trim_end_matches("/callback"), target))
                     .map_err(|_| OAuthError::CallbackListener)?;
-                let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 44\r\nConnection: close\r\n\r\nAuthorization received. Return to gchatui.\n";
-                stream.write_all(response).await.map_err(|_| OAuthError::CallbackListener)?;
+                let body = "Authorization response received. Return to gchatui to check the result.\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.map_err(|_| OAuthError::CallbackListener)?;
+                stream.shutdown().await.map_err(|_| OAuthError::CallbackListener)?;
                 Ok(redirect)
             }
         }
@@ -181,6 +198,9 @@ impl AuthorizationRequest {
             return Err(OAuthError::ConsentDenied(error));
         }
         let code = code.ok_or(OAuthError::MissingCode)?;
+        if let Some((_, scopes)) = redirect.query_pairs().find(|(key, _)| key == "scope") {
+            validate_granted_scopes(&scopes)?;
+        }
         Ok(TokenExchange {
             endpoint: client.token_uri.clone(),
             client_id: client.client_id.clone(),
@@ -230,6 +250,9 @@ impl RefreshRequest {
             .json()
             .await
             .map_err(|_| OAuthError::MalformedToken)?;
+        if let Some(scopes) = &token.scope {
+            validate_granted_scopes(scopes)?;
+        }
         Ok(OAuthTokens {
             access_token: token.access_token,
             refresh_token: token.refresh_token,
@@ -275,6 +298,7 @@ struct TokenResponse {
     #[serde(deserialize_with = "deserialize_secret")]
     access_token: Secret,
     expires_in: u64,
+    scope: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_secret")]
     refresh_token: Option<Secret>,
 }
@@ -321,11 +345,26 @@ impl TokenExchange {
             .json()
             .await
             .map_err(|_| OAuthError::MalformedToken)?;
+        if let Some(scopes) = &token.scope {
+            validate_granted_scopes(scopes)?;
+        }
         Ok(OAuthTokens {
             access_token: token.access_token,
             refresh_token: token.refresh_token,
             expires_at: Instant::now() + Duration::from_secs(token.expires_in),
         })
+    }
+}
+
+fn validate_granted_scopes(scopes: &str) -> Result<(), OAuthError> {
+    if REQUIRED_SCOPES.iter().all(|required| {
+        scopes.split_ascii_whitespace().any(|granted| {
+            granted == *required || (*required == USERINFO_PROFILE && granted == "profile")
+        })
+    }) {
+        Ok(())
+    } else {
+        Err(OAuthError::MissingPermissions)
     }
 }
 
@@ -359,12 +398,7 @@ pub fn authorization_request(
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", &state)
-        .append_pair(
-            "scope",
-            &format!(
-                "{CHAT_SPACES_READONLY} {CHAT_MESSAGES_READONLY} {DIRECTORY_READONLY} {CONTACTS_READONLY} {CHAT_MEMBERSHIPS_READONLY} {USERINFO_PROFILE}"
-            ),
-        )
+        .append_pair("scope", &REQUIRED_SCOPES.join(" "))
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent");
     Ok(AuthorizationRequest {
@@ -489,6 +523,12 @@ mod tests {
             .unwrap();
         let received = waiter.await.unwrap().unwrap();
         assert_eq!(received.query(), Some("code=synthetic&state=synthetic"));
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.contains(&format!("Content-Length: {}", body.len())));
+        assert!(headers.contains("Cache-Control: no-store"));
+        assert!(!body.contains("synthetic"));
 
         let callback = LoopbackCallback::bind().await.unwrap();
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -551,6 +591,91 @@ mod tests {
             request.accept_redirect(&redirect, &client(), REDIRECT_URI),
             Err(OAuthError::StateMismatch)
         ));
+    }
+
+    #[test]
+    fn consent_requires_every_existing_scope() {
+        assert!(validate_granted_scopes(&REQUIRED_SCOPES.join(" ")).is_ok());
+        assert!(
+            validate_granted_scopes(
+                &REQUIRED_SCOPES
+                    .join(" ")
+                    .replace(USERINFO_PROFILE, "profile")
+            )
+            .is_ok()
+        );
+        for omitted in REQUIRED_SCOPES {
+            let scopes = REQUIRED_SCOPES
+                .iter()
+                .copied()
+                .filter(|scope| *scope != omitted)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(matches!(
+                validate_granted_scopes(&scopes),
+                Err(OAuthError::MissingPermissions)
+            ));
+        }
+    }
+
+    #[test]
+    fn partial_consent_is_rejected_before_token_exchange() {
+        let request = authorization_request(&client(), REDIRECT_URI).unwrap();
+        let mut redirect = Url::parse(REDIRECT_URI).unwrap();
+        redirect
+            .query_pairs_mut()
+            .append_pair("state", &request.state)
+            .append_pair("code", "synthetic-code")
+            .append_pair("scope", "profile");
+        assert!(matches!(
+            request.accept_redirect(&redirect, &client(), REDIRECT_URI),
+            Err(OAuthError::MissingPermissions)
+        ));
+        redirect.set_query(None);
+        redirect
+            .query_pairs_mut()
+            .append_pair("state", &request.state)
+            .append_pair("code", "synthetic-code")
+            .append_pair("scope", &REQUIRED_SCOPES.join(" "));
+        assert!(
+            request
+                .accept_redirect(&redirect, &client(), REDIRECT_URI)
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn token_exchange_rejects_partial_permissions() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 8192];
+            let count = stream.read(&mut request).await.unwrap();
+            assert!(count > 0);
+            let body = r#"{"access_token":"test","expires_in":3600,"scope":"profile"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut installed = client();
+        installed.token_uri = format!("http://{address}/token");
+        let request = authorization_request(&installed, REDIRECT_URI).unwrap();
+        let mut redirect = Url::parse(REDIRECT_URI).unwrap();
+        redirect
+            .query_pairs_mut()
+            .append_pair("state", &request.state)
+            .append_pair("code", "synthetic");
+        let exchange = request
+            .accept_redirect(&redirect, &installed, REDIRECT_URI)
+            .unwrap();
+        assert!(matches!(
+            exchange.execute(&reqwest::Client::new()).await,
+            Err(OAuthError::MissingPermissions)
+        ));
+        server.await.unwrap();
     }
 
     #[test]

@@ -18,6 +18,12 @@ The first usable release will support:
 Sending messages, reactions, search, read-state mutation, local conversation
 history, and real-time Workspace Events are outside the first release.
 
+See the [official OAuth rollout](docs/official-oauth-rollout.md) for the planned
+maintainer-operated sign-in experience and release gates. Local testing currently
+still requires a private desktop OAuth client file; the official client is not yet
+bundled or verified. A [privacy-policy draft](docs/privacy-policy-draft.md) is
+available for maintainer review before publication.
+
 ## Privacy and public development
 
 Repository content uses synthetic examples only. Do not add real account details,

@@ -1,7 +1,9 @@
 # Google Cloud setup
 
-The first release will use a desktop OAuth client supplied by each user. Detailed
-steps will be verified during OAuth implementation. The intended setup is:
+Local testing currently uses a private user-supplied Desktop OAuth client file.
+The planned official release client and verification gates are documented in
+[Official OAuth application rollout](official-oauth-rollout.md). Until that rollout
+is complete, create or select a client as follows:
 
 1. Create or select a Google Cloud project.
 2. Enable the **Google Chat API** and **People API**.
