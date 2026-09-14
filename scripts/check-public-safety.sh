@@ -29,6 +29,12 @@ fi
 while IFS= read -r match; do
   address="${match##*:}"
   case "${address,,}" in
+    bradensteffaniak@gmail.com)
+      case "${match%%:*}" in
+        packages/site/src/main.rs|scripts/check-public-safety.sh) ;;
+        *) echo "public-safety: approved contact outside website source: $match" >&2; status=1 ;;
+      esac
+      ;;
     *@example.com|*@example.org|*@example.net) ;;
     *)
       echo "public-safety: non-example email address: $match" >&2

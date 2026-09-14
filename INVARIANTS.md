@@ -11,7 +11,11 @@ These are acceptance criteria for every valid change.
 - **Repository content is public-safe.** Source, history, tests, fixtures, examples,
   logs, diagnostics, screenshots, recordings, and release artifacts contain only
   synthetic data. Real private affiliations, accounts, people, workspaces,
-  conversations, credentials, and identifiers are prohibited.
+  conversations, credentials, and identifiers are prohibited. The sole public
+  identity exception is the explicitly approved website operator name and privacy
+  contact in `packages/site/src/main.rs`, including its generated website output.
+  Mechanical guards may identify that exact contact to enforce this exception.
+  This does not permit other real accounts, private identifiers, or credentials.
 
 ## Architecture
 

@@ -30,13 +30,20 @@ fn privacy() -> Containers {
     container! {
         div padding=32 background="#0d1117" color="#c9d1d9" font-family="monospace" {
             anchor href="/" color="#79c0ff" margin-bottom=24 { "← gchatui" }
-            h1 font-size=36 color="#f0f6fc" margin-bottom=24 { "Privacy information" }
-            div color="#e3b341" margin-bottom=24 { "Pre-release notice: a finalized policy with operator, private contact, and effective date is required before Google verification." }
+            h1 font-size=36 color="#f0f6fc" margin-bottom=24 { "Privacy policy" }
+            div margin-bottom=16 { "Effective September 14, 2026. Operated by Braden Steffaniak." }
+            anchor href="mailto:BradenSteffaniak@gmail.com" color="#79c0ff" margin-bottom=24 { "Privacy contact: BradenSteffaniak@gmail.com" }
             h2 font-size=24 margin-bottom=12 { "Desktop application" }
             div margin-bottom=16 { "With consent, gchatui reads Chat spaces, messages, replies, and memberships. Profile, contacts, and directory access resolve names. The first release does not send or modify messages." }
             div margin-bottom=16 { "The app connects directly to Google. Conversations and name indexes stay in memory; no conversation history is persisted or uploaded to a gchatui server. Imported aliases stay local." }
             div margin-bottom=16 { "Access tokens stay in memory. Session-only mode persists no tokens. Persistent mode stores the refresh token in an app-specific encrypted sshenv vault. The identity is passphrase-protected by default. Disabling its passphrase explicitly relies on filesystem permissions; copying both identity and vault permits token recovery." }
             div margin-bottom=24 { "The current app has no analytics or conversation-upload service. Google data is not used for advertising or model training. Workspace administrators can observe or block OAuth access." }
+            h2 font-size=24 margin-bottom=12 { "Google data and support" }
+            div margin-bottom=16 { "gchatui's use and transfer of information received from Google APIs will adhere to the Google API Services User Data Policy, including its Limited Use requirements." }
+            anchor href="https://developers.google.com/terms/api-services-user-data-policy" color="#79c0ff" margin-bottom=16 { "Google API Services User Data Policy →" }
+            div margin-bottom=16 { "If you contact the operator, your message and contact details are used to respond and resolve your request, and retained only as needed for that purpose or legal obligations. Do not send tokens, callback URLs, or private conversations. You may request deletion of support correspondence through the privacy contact above. The operator cannot delete Google-held conversations or files stored only on your device." }
+            h2 font-size=24 margin-bottom=12 { "Policy changes" }
+            div margin-bottom=24 { "Updates will be published on this page with a revised effective date. Material changes to data use will be disclosed before they take effect; additional Google permissions will require consent." }
             h2 font-size=24 margin-bottom=12 { "Your controls" }
             div margin-bottom=16 { "Decline consent, close the app, or revoke authorization through Google Account connections. Revocation does not delete local files; remove app-specific credentials and aliases separately. Do not remove a global sshenv vault. Backups may retain local files." }
             anchor href="https://myaccount.google.com/connections" color="#79c0ff" margin-bottom=24 { "Google Account connections →" }

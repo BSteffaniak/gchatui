@@ -16,5 +16,8 @@ test('home links to privacy and privacy discloses hosting', () => {
   const privacy = readFileSync(new URL('../../dist/privacy.html', import.meta.url), 'utf8');
   assert.match(home, /href="\/privacy"/);
   assert.match(privacy, /Cloudflare/);
-  assert.match(privacy, /Pre-release notice/);
+  assert.doesNotMatch(privacy, /Pre-release notice/);
+  assert.match(privacy, /href="mailto:[^"]+"/);
+  assert.match(privacy, /Limited Use requirements/);
+  assert.match(privacy, /Effective September 14, 2026/);
 });
