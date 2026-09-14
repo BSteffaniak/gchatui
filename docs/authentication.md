@@ -48,8 +48,10 @@ Workspace restrictions can still deny APIs after complete consent.
 The TUI offers Sign in / storage through a footer button and the configurable
 `authenticate` action. When no token is available, it opens a storage menu with
 session-only, passphrase-protected vault, and explicitly unprotected-identity
-choices. Choices apply to this process; set local configuration explicitly to
-remember a startup storage preference across launches.
+choices. After successful sign-in, the selected storage mode is saved to local
+configuration for subsequent launches. Other configuration values are preserved;
+the TOML file is reserialized, so comments and formatting may change. Failed
+sign-in does not persist a new choice.
 
 Selecting a mode exits the current terminal runtime, restores the terminal for
 passphrase/browser authorization, then returns to a fresh TUI without restarting

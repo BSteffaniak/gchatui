@@ -1606,8 +1606,8 @@ fn alias_picker_content_area(area: Rect) -> Rect {
 
 const STORAGE_OPTIONS: [&str; 3] = [
     "Sign in: session only (no saved token)",
-    "Sign in: encrypted vault with passphrase",
-    "Sign in: vault + unprotected identity (device risk)",
+    "Sign in: vault with passphrase",
+    "Sign in: vault without passphrase",
 ];
 
 fn auth_button_area(footer: Rect) -> Rect {

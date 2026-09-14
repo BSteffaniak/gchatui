@@ -45,7 +45,27 @@ async fn main() -> anyhow::Result<()> {
         config.session_only = selection == 0;
         config.vault_passphrase = selection != 2;
         match startup_access_token(&config, true).await {
-            Ok(token) => access_token = token,
+            Ok(token) => {
+                access_token = token;
+                match path.as_deref() {
+                    Some(path) => {
+                        if config::save_storage_choice(
+                            path,
+                            config.session_only,
+                            config.vault_passphrase,
+                        )
+                        .is_err()
+                        {
+                            eprintln!(
+                                "Signed in, but could not save the storage preference. The next launch will use the previous setting."
+                            );
+                        }
+                    }
+                    None => eprintln!(
+                        "Signed in, but no configuration directory is available to remember the storage preference."
+                    ),
+                }
+            }
             Err(error) => eprintln!(
                 "Sign-in failed: {error}. Choose Sign in / storage to retry. Workspace policy may require administrator approval."
             ),
