@@ -17,8 +17,15 @@ and configure required reviewers if desired. Add these environment secrets:
 - `R2_STATE_ACCESS_KEY_ID`
 - `R2_STATE_SECRET_ACCESS_KEY`
 
-Set environment variable `R2_STATE_BUCKET` to an existing private state bucket.
-The Bcode state bucket can be reused with its owner's approval and bucket-scoped
+Set environment variable `R2_STATE_BUCKET` to `gchatui-tofu-state` (recommended).
+Run **Bootstrap Website State** in GitHub Actions once before deployment. It uses
+Cloudflare's API to create a private bucket if missing, without needing an existing
+state bucket or persisting a second bootstrap state. Existing buckets are left
+unchanged, including their access settings; ensure an existing bucket is private.
+The bootstrap API token also needs account R2 Storage edit permission.
+After bootstrap, ensure the R2 credentials above are scoped to this bucket.
+
+Alternatively, Bcode state bucket can be reused with its owner's approval and bucket-scoped
 R2 credentials. This stack uses the separate key `cloudflare/gchatui-site.tfstate`;
 it must never use Bcode's key. The bucket must exist before the first deployment.
 No application-data bucket or AWS service access is required.
