@@ -117,6 +117,36 @@ impl ProductState {
         })
     }
 
+    #[must_use]
+    pub fn accepts(&self, message: &ProductMessage) -> bool {
+        match message {
+            ProductMessage::MessagesLoaded {
+                request_id,
+                space_name,
+                ..
+            } => {
+                self.active_messages_request.as_ref() == Some(&(*request_id, space_name.clone()))
+                    && self.selected_space.as_ref() == Some(space_name)
+            }
+            ProductMessage::SpacesLoaded { request_id, .. } => {
+                self.active_spaces_request == Some(*request_id)
+            }
+        }
+    }
+
+    pub fn poll(&mut self) -> Option<Effect> {
+        if self.active_messages_request.is_some()
+            || self.active_spaces_request.is_some()
+            || !matches!(
+                self.phase,
+                Phase::Ready | Phase::Empty | Phase::RecoverableError
+            )
+        {
+            return None;
+        }
+        self.refresh()
+    }
+
     pub fn update(&mut self, message: ProductMessage) {
         match message {
             ProductMessage::SpacesLoaded { request_id, result }
@@ -170,6 +200,8 @@ impl ProductState {
     }
 
     fn merge_messages(&mut self, incoming: Vec<Message>) {
+        self.messages
+            .retain(|existing| !incoming.iter().any(|message| message.id == existing.id));
         self.messages.extend(incoming);
         self.messages.sort_by(|left, right| {
             left.create_time
@@ -184,6 +216,43 @@ impl ProductState {
 mod tests {
     use super::*;
     use crate::model::{MessageId, SpaceId, SpaceKind};
+
+    #[test]
+    fn polling_waits_for_load_and_updates_existing_messages() {
+        let mut state = ProductState::default();
+        let Effect::LoadMessages {
+            request_id,
+            space_name,
+            ..
+        } = state.select_space("synthetic-space".to_string())
+        else {
+            unreachable!()
+        };
+        assert!(state.poll().is_none());
+        state.update(ProductMessage::MessagesLoaded {
+            request_id,
+            space_name,
+            result: Ok((vec![message("one", "1")], None)),
+        });
+        let Effect::LoadMessages {
+            request_id,
+            space_name,
+            ..
+        } = state.poll().unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(state.poll().is_none());
+        state.update(ProductMessage::MessagesLoaded {
+            request_id,
+            space_name,
+            result: Ok((vec![message("one", "2")], None)),
+        });
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].create_time, "2");
+        state.phase = Phase::Reauthentication;
+        assert!(state.poll().is_none());
+    }
 
     fn space(name: &str) -> Space {
         Space {

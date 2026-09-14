@@ -72,6 +72,7 @@ pub enum AppMessage {
         message: ProductMessage,
         current_user: Option<(std::collections::BTreeSet<String>, Option<String>)>,
     },
+    Poll,
     InputError(std::io::Error),
 }
 
@@ -103,6 +104,9 @@ pub struct App {
     focused_pane: FocusedPane,
     follow_conversation_bottom: bool,
     help_visible: bool,
+    poll_interval: u64,
+    polling: Option<u64>,
+    poll_page: Option<crate::model::PageToken>,
 }
 
 struct AliasPicker {
@@ -161,6 +165,9 @@ impl App {
             focused_pane: FocusedPane::Spaces,
             follow_conversation_bottom: false,
             help_visible: false,
+            poll_interval: 5,
+            polling: None,
+            poll_page: None,
         }
     }
 
@@ -773,25 +780,79 @@ impl Program for App {
     ) -> Result<Update<Self::Message>, Self::Error> {
         match event {
             RuntimeEvent::Terminal(event) => Ok(self.update_terminal(event)),
-            RuntimeEvent::Message(AppMessage::Start) => Ok(startup_update(self)),
+            RuntimeEvent::Message(AppMessage::Start) => {
+                Ok(startup_update(self).with_command(poll_timer(5)))
+            }
+            RuntimeEvent::Message(AppMessage::Poll) => {
+                if !self.auth_menu
+                    && self.access_token.is_some()
+                    && let Some(effect) = self.product.poll()
+                {
+                    if let Effect::LoadMessages { request_id, .. } = &effect {
+                        self.polling = Some(*request_id);
+                    }
+                    self.poll_page = self.product.next_message_page.clone();
+                    if let Some(command) = self.command_for_effect(effect) {
+                        return Ok(Update::none()
+                            .with_command(command)
+                            .with_command(poll_timer(self.poll_interval)));
+                    }
+                }
+                Ok(Update::none().with_command(poll_timer(self.poll_interval)))
+            }
             RuntimeEvent::Message(AppMessage::MessagesWithIdentity {
                 message,
                 current_user,
             }) => {
+                if !self.product.accepts(&message) {
+                    return Ok(Update::none());
+                }
+                let was_poll = matches!(&message, ProductMessage::MessagesLoaded { request_id, .. } if self.polling == Some(*request_id));
+                let previous = self.product.messages.clone();
                 self.product.update(message);
+                if was_poll {
+                    self.poll_interval =
+                        if self.product.messages != previous || self.poll_interval < 5 {
+                            5
+                        } else {
+                            (self.poll_interval * 2).min(60)
+                        };
+                    self.product.next_message_page = self.poll_page.take();
+                    self.polling = None;
+                }
                 apply_sender_aliases(self);
                 infer_direct_message_name(self, current_user.as_ref());
                 self.rebuild_projections();
-                self.follow_conversation_bottom = true;
+                if !was_poll {
+                    self.follow_conversation_bottom = true;
+                }
                 sync_space_selection(self);
                 Ok(Update::reset())
             }
             RuntimeEvent::Message(AppMessage::Product(message)) => {
                 let messages_loaded = matches!(message, ProductMessage::MessagesLoaded { .. });
+                if !self.product.accepts(&message) {
+                    return Ok(Update::none());
+                }
+                let was_poll = matches!(&message, ProductMessage::MessagesLoaded { request_id, .. } if self.polling == Some(*request_id));
+                let previous = self.product.messages.clone();
                 self.product.update(message);
+                if was_poll {
+                    self.poll_interval =
+                        if self.product.messages != previous || self.poll_interval < 5 {
+                            5
+                        } else {
+                            (self.poll_interval * 2).min(60)
+                        };
+                    self.product.next_message_page = self.poll_page.take();
+                    self.polling = None;
+                }
                 apply_sender_aliases(self);
                 self.rebuild_projections();
-                if messages_loaded && matches!(self.product.phase, Phase::Ready | Phase::Empty) {
+                if !was_poll
+                    && messages_loaded
+                    && matches!(self.product.phase, Phase::Ready | Phase::Empty)
+                {
                     self.follow_conversation_bottom = true;
                 }
                 sync_space_selection(self);
@@ -801,6 +862,13 @@ impl Program for App {
             RuntimeEvent::Timer(_) => Ok(Update::none()),
         }
     }
+}
+
+fn poll_timer(seconds: u64) -> Command<AppMessage> {
+    Command::replace(CommandKey::new("poll-timer"), async move {
+        tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+        Some(AppMessage::Poll)
+    })
 }
 
 pub async fn run(
