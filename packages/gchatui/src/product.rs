@@ -230,7 +230,11 @@ impl ProductState {
                 self.active_messages_request = None;
                 match result {
                     Ok((messages, next_page)) => {
-                        if let Some(latest) = messages.last() {
+                        // Opening an unchecked space must not promote it above
+                        // spaces the activity sweep has not observed yet.
+                        if let Some(latest) = messages.last()
+                            && self.recency.contains_key(&space_name)
+                        {
                             self.observe_recency(&space_name, &latest.create_time);
                             self.sort_spaces_by_recency();
                         }
@@ -287,6 +291,47 @@ mod tests {
         state.reconcile_spaces(vec![space("unknown"), space("a"), space("b")]);
         assert_eq!(state.spaces[0].id.0, "b");
         assert_eq!(state.spaces[2].id.0, "unknown");
+    }
+
+    #[test]
+    fn opening_unobserved_space_does_not_change_sidebar_order() {
+        let mut state = ProductState::default();
+        state.reconcile_spaces(vec![space("first"), space("old")]);
+        let Effect::LoadMessages {
+            request_id,
+            space_name,
+            ..
+        } = state.select_space("old".to_string())
+        else {
+            unreachable!()
+        };
+        state.update(ProductMessage::MessagesLoaded {
+            request_id,
+            space_name,
+            result: Ok((vec![message("old-message", "2020-01-01T00:00:00Z")], None)),
+        });
+        assert_eq!(state.spaces[0].id.0, "first");
+        assert!(!state.recency.contains_key("old"));
+        assert_eq!(state.selected_space.as_deref(), Some("old"));
+        // The sweep establishes both timestamps independently of navigation.
+        state.observe_recency("first", "2026-01-01T00:00:00Z");
+        state.observe_recency("old", "2020-01-01T00:00:00Z");
+        state.sort_spaces_by_recency();
+        assert_eq!(state.spaces[0].id.0, "first");
+        let Effect::LoadMessages {
+            request_id,
+            space_name,
+            ..
+        } = state.refresh().unwrap()
+        else {
+            unreachable!()
+        };
+        state.update(ProductMessage::MessagesLoaded {
+            request_id,
+            space_name,
+            result: Ok((vec![message("new-message", "2026-02-01T00:00:00Z")], None)),
+        });
+        assert_eq!(state.spaces[0].id.0, "old");
     }
 
     #[test]
