@@ -76,7 +76,7 @@ pub enum AppMessage {
     Sweep,
     SweepFinished {
         result: Result<Vec<crate::model::Space>, crate::chat::ChatError>,
-        activity: Vec<(String, Option<crate::model::MessageId>)>,
+        activity: Vec<(String, Option<(crate::model::MessageId, String)>)>,
     },
     InputError(std::io::Error),
 }
@@ -191,6 +191,20 @@ impl App {
         self.conversation_pane.interaction.focused = false;
     }
 
+    fn apply_sweep_activity(
+        &mut self,
+        activity: Vec<(String, Option<(crate::model::MessageId, String)>)>,
+    ) {
+        for (space, latest) in activity {
+            self.product
+                .observe_activity(&space, latest.as_ref().map(|(id, _)| id));
+            if let Some((_, timestamp)) = latest {
+                self.product.observe_recency(&space, &timestamp);
+            }
+        }
+        self.product.sort_spaces_by_recency();
+    }
+
     fn start_sweep(&self) -> Update<AppMessage> {
         if self.auth_menu
             || self.access_token.is_none()
@@ -212,7 +226,9 @@ impl App {
                         match chat.list_messages(token.as_ref(), &space.id, 1, None).await {
                             Ok(page) => activity.push((
                                 space.id.0.clone(),
-                                page.items.last().map(|message| message.id.clone()),
+                                page.items.last().map(|message| {
+                                    (message.id.clone(), message.create_time.clone())
+                                }),
                             )),
                             Err(
                                 crate::chat::ChatError::Unauthorized
@@ -829,9 +845,7 @@ impl Program for App {
                 let delay = if result.is_ok() { 60 } else { 120 };
                 if let Ok(spaces) = result {
                     self.product.reconcile_spaces(spaces);
-                    for (space, latest) in activity {
-                        self.product.observe_activity(&space, latest.as_ref());
-                    }
+                    self.apply_sweep_activity(activity);
                     self.rebuild_projections();
                     sync_space_selection(self);
                 }
@@ -1069,8 +1083,16 @@ fn sync_space_selection(app: &mut App) {
         return;
     }
     let selected = app
-        .spaces
-        .selected()
+        .product
+        .selected_space
+        .as_ref()
+        .and_then(|id| {
+            app.product
+                .spaces
+                .iter()
+                .position(|space| &space.id.0 == id)
+        })
+        .or_else(|| app.spaces.selected())
         .unwrap_or(0)
         .min(app.product.spaces.len() - 1);
     app.spaces.set_selected(Some(selected));

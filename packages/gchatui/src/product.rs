@@ -47,6 +47,7 @@ pub enum Effect {
 #[derive(Debug)]
 pub struct ProductState {
     pub phase: Phase,
+    recency: std::collections::BTreeMap<String, String>,
     pub new_activity: std::collections::BTreeSet<String>,
     activity_baselines: std::collections::BTreeMap<String, Option<crate::model::MessageId>>,
     pub spaces: Vec<Space>,
@@ -62,6 +63,7 @@ impl Default for ProductState {
     fn default() -> Self {
         Self {
             phase: Phase::MissingConfiguration,
+            recency: std::collections::BTreeMap::new(),
             new_activity: std::collections::BTreeSet::new(),
             activity_baselines: std::collections::BTreeMap::new(),
             spaces: Vec::new(),
@@ -87,6 +89,24 @@ impl ProductState {
         }
     }
 
+    pub fn observe_recency(&mut self, space: &str, timestamp: &str) {
+        let timestamp = timestamp.trim_end_matches('Z');
+        let (seconds, fraction) = timestamp.split_once('.').unwrap_or((timestamp, ""));
+        let timestamp = format!("{seconds}.{fraction:0<9}");
+        let previous = self.recency.entry(space.to_string()).or_default();
+        if timestamp > *previous {
+            *previous = timestamp;
+        }
+    }
+
+    pub fn sort_spaces_by_recency(&mut self) {
+        self.spaces.sort_by(|left, right| {
+            self.recency
+                .get(&right.id.0)
+                .cmp(&self.recency.get(&left.id.0))
+        });
+    }
+
     pub fn reconcile_spaces(&mut self, mut spaces: Vec<Space>) {
         for space in &mut spaces {
             if space.display_name.trim().is_empty()
@@ -99,7 +119,10 @@ impl ProductState {
             .retain(|id| spaces.iter().any(|space| &space.id.0 == id));
         self.activity_baselines
             .retain(|id, _| spaces.iter().any(|space| &space.id.0 == id));
+        self.recency
+            .retain(|id, _| spaces.iter().any(|space| &space.id.0 == id));
         self.spaces = spaces;
+        self.sort_spaces_by_recency();
     }
 
     pub const fn load_spaces(&mut self) -> Effect {
@@ -207,6 +230,10 @@ impl ProductState {
                 self.active_messages_request = None;
                 match result {
                     Ok((messages, next_page)) => {
+                        if let Some(latest) = messages.last() {
+                            self.observe_recency(&space_name, &latest.create_time);
+                            self.sort_spaces_by_recency();
+                        }
                         self.new_activity.remove(&space_name);
                         self.merge_messages(messages);
                         self.next_message_page = next_page;
@@ -247,6 +274,20 @@ impl ProductState {
 mod tests {
     use super::*;
     use crate::model::{MessageId, SpaceId, SpaceKind};
+
+    #[test]
+    fn recency_orders_newest_first_and_older_pages_do_not_demote() {
+        let mut state = ProductState::default();
+        state.reconcile_spaces(vec![space("a"), space("b"), space("unknown")]);
+        state.observe_recency("a", "2026-01-01T00:00:00Z");
+        state.observe_recency("b", "2026-01-01T00:00:00.1Z");
+        state.sort_spaces_by_recency();
+        assert_eq!(state.spaces[0].id.0, "b");
+        state.observe_recency("b", "2025-01-01T00:00:00Z");
+        state.reconcile_spaces(vec![space("unknown"), space("a"), space("b")]);
+        assert_eq!(state.spaces[0].id.0, "b");
+        assert_eq!(state.spaces[2].id.0, "unknown");
+    }
 
     #[test]
     fn activity_is_baselined_then_marked_and_pruned() {

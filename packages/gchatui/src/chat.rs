@@ -235,8 +235,8 @@ impl ChatClient {
             }
             next = Some(token);
         }
-        spaces.sort_by(|left, right| left.id.cmp(&right.id));
-        spaces.dedup_by(|left, right| left.id == right.id);
+        let mut ids = std::collections::BTreeSet::new();
+        spaces.retain(|space| ids.insert(space.id.clone()));
         Ok(spaces)
     }
 
