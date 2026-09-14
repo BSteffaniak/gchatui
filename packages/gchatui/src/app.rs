@@ -805,7 +805,7 @@ impl Program for App {
 
 pub async fn run(
     bindings: KeybindingRegistry,
-    access_token: Option<Secret>,
+    access_token: Option<Arc<crate::auth::AuthManager>>,
     aliases: Option<Arc<SenderAliases>>,
     show_auth: bool,
 ) -> Result<Option<usize>> {
@@ -826,8 +826,10 @@ pub async fn run(
         app.aliases = aliases;
         app.auth_menu = show_auth;
         app.auth_result = Arc::clone(&auth_result);
-        let startup = access_token.map(|token| {
-            app.access_token = Some(Arc::new(token));
+        let startup = access_token.map(|auth| {
+            app.chat = Arc::new(ChatClient::with_auth(Arc::clone(&auth)));
+            app.people = Arc::new(PeopleClient::with_auth(auth));
+            app.access_token = Some(Arc::new(zeroize::Zeroizing::new(String::new())));
         });
         let (runtime, handle) = Runtime::new(
             app,

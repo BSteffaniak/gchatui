@@ -6,6 +6,7 @@ pub mod auth_command;
 pub mod chat;
 mod config;
 pub mod credential;
+mod google_http;
 mod keybind;
 pub mod model;
 pub mod oauth;
@@ -76,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
 async fn startup_access_token(
     config: &config::AppConfig,
     reauthorize: bool,
-) -> anyhow::Result<Option<credential::Secret>> {
+) -> anyhow::Result<Option<std::sync::Arc<auth::AuthManager>>> {
     let client = oauth::resolve_client(config.oauth_client_path.as_deref())?;
     let store: std::sync::Arc<dyn credential::CredentialStore + Send + Sync> = if config
         .session_only
@@ -109,6 +110,6 @@ async fn startup_access_token(
     } else {
         auth_command::ensure_client_authorized(client, store).await?
     };
-    let token = manager.access_token().await?;
-    Ok(Some(token))
+    manager.access_token().await?;
+    Ok(Some(manager))
 }

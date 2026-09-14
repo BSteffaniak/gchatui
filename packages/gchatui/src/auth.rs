@@ -100,13 +100,15 @@ impl AuthManager {
                 .load_refresh_token()?
                 .ok_or(AuthError::ReauthenticationRequired)?,
         };
-        let mut refreshed = RefreshRequest::new(&self.client, refresh_token)
+        let mut refreshed = RefreshRequest::new(&self.client, refresh_token.clone())
             .execute(&self.http)
             .await
             .map_err(AuthError::Refresh)?;
-        // Google commonly omits refresh_token on refresh. Preserve custody of the
-        // existing stored token while retaining only access data in memory.
-        refreshed.refresh_token = None;
+        if let Some(rotated) = &refreshed.refresh_token {
+            self.credentials.save_refresh_token(rotated.clone())?;
+        } else {
+            refreshed.refresh_token = Some(refresh_token);
+        }
         let access = Zeroizing::new(refreshed.access_token.to_string());
         *guard = Some(refreshed);
         drop(guard);

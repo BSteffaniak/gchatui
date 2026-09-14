@@ -31,7 +31,7 @@ pub enum ChatError {
 }
 
 pub struct ChatClient {
-    http: reqwest::Client,
+    http: crate::google_http::GoogleHttp,
     base_url: Url,
     retry: RetryPolicy,
 }
@@ -55,20 +55,22 @@ impl ChatClient {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("static HTTP configuration should be valid"),
+            http: crate::google_http::GoogleHttp::new(None),
             base_url: Url::parse(CHAT_API).expect("static Chat API URL should be valid"),
             retry: RetryPolicy::default(),
         }
     }
 
+    pub fn with_auth(auth: std::sync::Arc<crate::auth::AuthManager>) -> Self {
+        let mut client = Self::new();
+        client.http = crate::google_http::GoogleHttp::new(Some(auth));
+        client
+    }
+
     #[cfg(test)]
     fn with_base_url(base_url: Url) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::google_http::GoogleHttp::new(None),
             base_url,
             retry: RetryPolicy {
                 max_attempts: 1,
@@ -80,7 +82,7 @@ impl ChatClient {
     #[cfg(test)]
     fn with_retry(base_url: Url, max_attempts: u8) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::google_http::GoogleHttp::new(None),
             base_url,
             retry: RetryPolicy {
                 max_attempts,
@@ -261,13 +263,7 @@ impl ChatClient {
     ) -> Result<reqwest::Response, ChatError> {
         let attempts = self.retry.max_attempts.max(1);
         for attempt in 0..attempts {
-            match self
-                .http
-                .get(url.clone())
-                .bearer_auth(access_token.as_str())
-                .send()
-                .await
-            {
+            match self.http.get(url.clone(), access_token).await {
                 Ok(response)
                     if response.status().is_server_error()
                         || response.status() == StatusCode::TOO_MANY_REQUESTS =>
@@ -289,6 +285,9 @@ impl ChatClient {
                         &reqwest::header::HeaderMap::new(),
                     ))
                     .await;
+                }
+                Err(crate::google_http::RequestError::Authorization) => {
+                    return Err(ChatError::Unauthorized);
                 }
                 Err(_) => return Err(ChatError::Transport),
             }

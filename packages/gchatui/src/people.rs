@@ -23,8 +23,17 @@ pub enum PeopleError {
     Transport,
 }
 
+impl From<crate::google_http::RequestError> for PeopleError {
+    fn from(error: crate::google_http::RequestError) -> Self {
+        match error {
+            crate::google_http::RequestError::Authorization => Self::Unauthorized,
+            crate::google_http::RequestError::Transport(_) => Self::Transport,
+        }
+    }
+}
+
 pub struct PeopleClient {
-    http: reqwest::Client,
+    http: crate::google_http::GoogleHttp,
     base_url: Url,
     directory: tokio::sync::Mutex<Option<Arc<BTreeMap<String, String>>>>,
     current_user: tokio::sync::Mutex<Option<Arc<CurrentUser>>>,
@@ -41,11 +50,7 @@ impl PeopleClient {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("static HTTP configuration should be valid"),
+            http: crate::google_http::GoogleHttp::new(None),
             base_url: Url::parse(PEOPLE_API).expect("static People API URL should be valid"),
             directory: tokio::sync::Mutex::new(None),
             current_user: tokio::sync::Mutex::new(None),
@@ -53,10 +58,16 @@ impl PeopleClient {
         }
     }
 
+    pub fn with_auth(auth: std::sync::Arc<crate::auth::AuthManager>) -> Self {
+        let mut client = Self::new();
+        client.http = crate::google_http::GoogleHttp::new(Some(auth));
+        client
+    }
+
     #[cfg(test)]
     fn with_base_url(base_url: Url) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::google_http::GoogleHttp::new(None),
             base_url,
             directory: tokio::sync::Mutex::new(Some(Arc::new(BTreeMap::new()))),
             current_user: tokio::sync::Mutex::new(None),
@@ -67,7 +78,7 @@ impl PeopleClient {
     #[cfg(test)]
     fn with_directory_base_url(base_url: Url) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::google_http::GoogleHttp::new(None),
             base_url,
             directory: tokio::sync::Mutex::new(None),
             current_user: tokio::sync::Mutex::new(None),
@@ -79,7 +90,7 @@ impl PeopleClient {
     #[must_use]
     pub fn with_test_current_user(resource_name: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::google_http::GoogleHttp::new(None),
             base_url: Url::parse(PEOPLE_API).expect("static People API URL should be valid"),
             directory: tokio::sync::Mutex::new(Some(Arc::new(BTreeMap::new()))),
             current_user: tokio::sync::Mutex::new(Some(Arc::new(CurrentUser {
@@ -124,11 +135,13 @@ impl PeopleClient {
         }
         let response = self
             .http
-            .get("https://openidconnect.googleapis.com/v1/userinfo")
-            .bearer_auth(access_token.as_str())
-            .send()
+            .get(
+                Url::parse("https://openidconnect.googleapis.com/v1/userinfo")
+                    .expect("static userinfo URL"),
+                access_token,
+            )
             .await
-            .map_err(|_| PeopleError::Transport)?;
+            .map_err(PeopleError::from)?;
         match response.status() {
             status if status.is_success() => {}
             StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
@@ -149,11 +162,9 @@ impl PeopleClient {
             .append_pair("personFields", "names,metadata");
         let response = self
             .http
-            .get(url)
-            .bearer_auth(access_token.as_str())
-            .send()
+            .get(url, access_token)
             .await
-            .map_err(|_| PeopleError::Transport)?;
+            .map_err(PeopleError::from)?;
         match response.status() {
             status if status.is_success() => {}
             StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
@@ -281,11 +292,9 @@ impl PeopleClient {
             }
             let response = self
                 .http
-                .get(url)
-                .bearer_auth(access_token.as_str())
-                .send()
+                .get(url, access_token)
                 .await
-                .map_err(|_| PeopleError::Transport)?;
+                .map_err(PeopleError::from)?;
             match response.status() {
                 status if status.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
@@ -335,11 +344,9 @@ impl PeopleClient {
             }
             let response = self
                 .http
-                .get(url)
-                .bearer_auth(access_token.as_str())
-                .send()
+                .get(url, access_token)
                 .await
-                .map_err(|_| PeopleError::Transport)?;
+                .map_err(PeopleError::from)?;
             match response.status() {
                 status if status.is_success() => {}
                 StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
@@ -380,11 +387,9 @@ impl PeopleClient {
         }
         let response = self
             .http
-            .get(url)
-            .bearer_auth(access_token.as_str())
-            .send()
+            .get(url, access_token)
             .await
-            .map_err(|_| PeopleError::Transport)?;
+            .map_err(PeopleError::from)?;
         match response.status() {
             status if status.is_success() => {}
             StatusCode::UNAUTHORIZED => return Err(PeopleError::Unauthorized),
