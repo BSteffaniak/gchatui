@@ -11,6 +11,7 @@ use crate::keybind::{KeybindingError, KeybindingOverrides, KeybindingRegistry};
 struct ConfigFile {
     #[serde(default)]
     clock_format: crate::date_display::ClockFormat,
+    timestamp_format: Option<String>,
     oauth_client_path: Option<PathBuf>,
     #[serde(default = "default_session_only")]
     session_only: bool,
@@ -30,6 +31,7 @@ const fn default_vault_passphrase() -> bool {
 
 pub struct AppConfig {
     pub clock_format: crate::date_display::ClockFormat,
+    pub timestamp_format: Option<crate::date_display::TimestampFormat>,
     pub oauth_client_path: Option<PathBuf>,
     pub session_only: bool,
     pub vault_passphrase: bool,
@@ -38,6 +40,8 @@ pub struct AppConfig {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("{0}")]
+    TimestampFormat(&'static str),
     #[error("could not read configuration at {path}: {source}")]
     Read {
         path: PathBuf,
@@ -56,6 +60,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     let Some(path) = path else {
         return Ok(AppConfig {
             clock_format: crate::date_display::ClockFormat::default(),
+            timestamp_format: None,
             oauth_client_path: None,
             session_only: true,
             vault_passphrase: true,
@@ -65,6 +70,7 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     if !path.exists() {
         return Ok(AppConfig {
             clock_format: crate::date_display::ClockFormat::default(),
+            timestamp_format: None,
             oauth_client_path: None,
             session_only: true,
             vault_passphrase: true,
@@ -81,6 +87,11 @@ pub fn load(path: Option<&Path>) -> Result<AppConfig, ConfigError> {
     })?;
     Ok(AppConfig {
         clock_format: config.clock_format,
+        timestamp_format: config
+            .timestamp_format
+            .map(crate::date_display::TimestampFormat::parse)
+            .transpose()
+            .map_err(ConfigError::TimestampFormat)?,
         oauth_client_path: config.oauth_client_path,
         session_only: config.session_only,
         vault_passphrase: config.vault_passphrase,
@@ -143,6 +154,31 @@ mod tests {
     use super::*;
     use crate::keybind::Action;
     use tempfile::tempdir;
+
+    #[test]
+    fn custom_timestamp_format_survives_storage_changes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "clock_format = '12h'\ntimestamp_format = 'custom %Y'\n",
+        )
+        .unwrap();
+        save_storage_choice(&path, false, true).unwrap();
+        let config = load(Some(&path)).unwrap();
+        assert_eq!(
+            config
+                .timestamp_format
+                .unwrap()
+                .format_local("2026-06-15T12:00:00Z"),
+            "custom 2026"
+        );
+        fs::write(&path, "timestamp_format = '%Q'\n").unwrap();
+        assert!(matches!(
+            load(Some(&path)),
+            Err(ConfigError::TimestampFormat(_))
+        ));
+    }
 
     #[test]
     fn clock_format_is_configurable_and_preserved_by_storage_changes() {

@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         let selection = app::run(
             config.keybindings.clone(),
             config.clock_format,
+            config.timestamp_format.clone(),
             access_token.take(),
             aliases.clone(),
             show_auth,

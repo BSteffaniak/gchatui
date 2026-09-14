@@ -48,8 +48,20 @@ Set the top-level option in your local `config.toml` and restart:
 clock_format = "12h" # 6:30 PM; use "24h" (default) for 18:30
 ```
 
-Dates remain explicit, seconds are omitted, and original timestamps are retained
-for ordering. Unrecognized timestamps are displayed unchanged.
+For full control, set `timestamp_format`; it overrides `clock_format`:
+
+```toml
+timestamp_format = "%Y-%m-%d %H:%M" # 2026-09-14 18:30
+# timestamp_format = "%b %-d · %-I:%M %p" # Sep 14 · 6:30 PM
+```
+
+Formats use [Chrono strftime syntax](https://docs.rs/chrono/latest/chrono/format/strftime/index.html)
+and local time. Remove `timestamp_format` to return to the clock preset. Empty or
+invalid formats and control characters (including `%n` and `%t`) are rejected at
+startup. Use `%%` for a literal percent sign.
+
+Original timestamps are retained for ordering. Unrecognized timestamps are
+displayed unchanged.
 
 ## Development
 

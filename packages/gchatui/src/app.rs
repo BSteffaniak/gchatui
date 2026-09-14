@@ -90,6 +90,7 @@ pub enum AppMessage {
 pub struct App {
     bindings: KeybindingRegistry,
     clock_format: crate::date_display::ClockFormat,
+    timestamp_format: Option<crate::date_display::TimestampFormat>,
     interactions: InteractionRouter,
     spaces: SelectableListState,
     space_items: Arc<Vec<SelectableListItem>>,
@@ -149,6 +150,7 @@ impl App {
         Self {
             bindings,
             clock_format: crate::date_display::ClockFormat::default(),
+            timestamp_format: None,
             interactions: InteractionRouter::new(),
             spaces: SelectableListState::new(Some(0)),
             space_items: Arc::new(Vec::new()),
@@ -186,7 +188,11 @@ impl App {
 
     fn rebuild_projections(&mut self) {
         self.space_items = Arc::new(project_spaces(&self.product));
-        let projection = project_conversation(&self.product, self.clock_format);
+        let projection = project_conversation(
+            &self.product,
+            self.clock_format,
+            self.timestamp_format.as_ref(),
+        );
         self.conversation_lines = Arc::new(projection.lines);
         self.conversation_items = Arc::new(projection.items);
         self.thread_activity_links = Arc::new(projection.links);
@@ -1000,6 +1006,7 @@ fn poll_timer(seconds: u64) -> Command<AppMessage> {
 pub async fn run(
     bindings: KeybindingRegistry,
     clock_format: crate::date_display::ClockFormat,
+    timestamp_format: Option<crate::date_display::TimestampFormat>,
     access_token: Option<Arc<crate::auth::AuthManager>>,
     aliases: Option<Arc<SenderAliases>>,
     show_auth: bool,
@@ -1019,6 +1026,7 @@ pub async fn run(
         );
         let mut app = App::new(bindings);
         app.clock_format = clock_format;
+        app.timestamp_format = timestamp_format;
         app.aliases = aliases;
         app.auth_menu = show_auth;
         app.auth_result = Arc::clone(&auth_result);
@@ -1200,6 +1208,7 @@ fn project_spaces(product: &ProductState) -> Vec<SelectableListItem> {
 fn project_conversation(
     product: &ProductState,
     clock: crate::date_display::ClockFormat,
+    custom: Option<&crate::date_display::TimestampFormat>,
 ) -> TranscriptProjection {
     if product.messages.is_empty() {
         let line = Line::from(match product.phase {
@@ -1220,7 +1229,10 @@ fn project_conversation(
     }
     let mut display_messages = product.messages.clone();
     for message in &mut display_messages {
-        message.create_time = clock.format_local(&message.create_time);
+        message.create_time = custom.map_or_else(
+            || clock.format_local(&message.create_time),
+            |format| format.format_local(&message.create_time),
+        );
     }
     crate::transcript_projection::project(
         &display_messages,
