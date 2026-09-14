@@ -217,6 +217,29 @@ impl ChatClient {
         })
     }
 
+    pub async fn list_all_spaces(
+        &self,
+        access_token: &Zeroizing<String>,
+    ) -> Result<Vec<Space>, ChatError> {
+        let mut spaces = Vec::new();
+        let mut next = None;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let page = self.list_spaces(access_token, 1000, next.as_ref()).await?;
+            spaces.extend(page.items);
+            let Some(token) = page.next_page_token else {
+                break;
+            };
+            if !seen.insert(token.0.clone()) {
+                return Err(ChatError::Malformed);
+            }
+            next = Some(token);
+        }
+        spaces.sort_by(|left, right| left.id.cmp(&right.id));
+        spaces.dedup_by(|left, right| left.id == right.id);
+        Ok(spaces)
+    }
+
     pub async fn list_messages(
         &self,
         access_token: &Zeroizing<String>,

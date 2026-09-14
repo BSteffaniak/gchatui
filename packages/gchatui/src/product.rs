@@ -47,6 +47,8 @@ pub enum Effect {
 #[derive(Debug)]
 pub struct ProductState {
     pub phase: Phase,
+    pub new_activity: std::collections::BTreeSet<String>,
+    activity_baselines: std::collections::BTreeMap<String, Option<crate::model::MessageId>>,
     pub spaces: Vec<Space>,
     pub messages: Vec<Message>,
     pub selected_space: Option<String>,
@@ -60,6 +62,8 @@ impl Default for ProductState {
     fn default() -> Self {
         Self {
             phase: Phase::MissingConfiguration,
+            new_activity: std::collections::BTreeSet::new(),
+            activity_baselines: std::collections::BTreeMap::new(),
             spaces: Vec::new(),
             messages: Vec::new(),
             selected_space: None,
@@ -72,6 +76,32 @@ impl Default for ProductState {
 }
 
 impl ProductState {
+    pub fn observe_activity(&mut self, space: &str, latest: Option<&crate::model::MessageId>) {
+        if let Some(previous) = self
+            .activity_baselines
+            .insert(space.to_string(), latest.cloned())
+            && previous.as_ref() != latest
+            && latest.is_some()
+        {
+            self.new_activity.insert(space.to_string());
+        }
+    }
+
+    pub fn reconcile_spaces(&mut self, mut spaces: Vec<Space>) {
+        for space in &mut spaces {
+            if space.display_name.trim().is_empty()
+                && let Some(old) = self.spaces.iter().find(|old| old.id == space.id)
+            {
+                space.display_name.clone_from(&old.display_name);
+            }
+        }
+        self.new_activity
+            .retain(|id| spaces.iter().any(|space| &space.id.0 == id));
+        self.activity_baselines
+            .retain(|id, _| spaces.iter().any(|space| &space.id.0 == id));
+        self.spaces = spaces;
+    }
+
     pub const fn load_spaces(&mut self) -> Effect {
         let request_id = self.allocate_request_id();
         self.active_spaces_request = Some(request_id);
@@ -177,6 +207,7 @@ impl ProductState {
                 self.active_messages_request = None;
                 match result {
                     Ok((messages, next_page)) => {
+                        self.new_activity.remove(&space_name);
                         self.merge_messages(messages);
                         self.next_message_page = next_page;
                         self.phase = if self.messages.is_empty() {
@@ -216,6 +247,20 @@ impl ProductState {
 mod tests {
     use super::*;
     use crate::model::{MessageId, SpaceId, SpaceKind};
+
+    #[test]
+    fn activity_is_baselined_then_marked_and_pruned() {
+        let mut state = ProductState::default();
+        state.reconcile_spaces(vec![space("one"), space("two")]);
+        let first = MessageId("first".to_string());
+        let second = MessageId("second".to_string());
+        state.observe_activity("two", Some(&first));
+        assert!(state.new_activity.is_empty());
+        state.observe_activity("two", Some(&second));
+        assert!(state.new_activity.contains("two"));
+        state.reconcile_spaces(vec![space("one")]);
+        assert!(state.new_activity.is_empty());
+    }
 
     #[test]
     fn polling_waits_for_load_and_updates_existing_messages() {

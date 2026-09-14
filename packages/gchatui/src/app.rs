@@ -73,6 +73,11 @@ pub enum AppMessage {
         current_user: Option<(std::collections::BTreeSet<String>, Option<String>)>,
     },
     Poll,
+    Sweep,
+    SweepFinished {
+        result: Result<Vec<crate::model::Space>, crate::chat::ChatError>,
+        activity: Vec<(String, Option<crate::model::MessageId>)>,
+    },
     InputError(std::io::Error),
 }
 
@@ -186,6 +191,42 @@ impl App {
         self.conversation_pane.interaction.focused = false;
     }
 
+    fn start_sweep(&self) -> Update<AppMessage> {
+        if self.auth_menu
+            || self.access_token.is_none()
+            || self.product.phase == Phase::Reauthentication
+        {
+            return Update::none().with_command(sweep_timer(60));
+        }
+        let chat = Arc::clone(&self.chat);
+        let token = self.access_token.clone().expect("token checked");
+        Update::none().with_command(Command::replace(
+            CommandKey::new("space-sweep"),
+            async move {
+                let result = chat.list_all_spaces(token.as_ref()).await;
+                let mut activity = Vec::new();
+                if let Ok(spaces) = &result {
+                    for space in spaces {
+                        // Pace background requests; no burst proportional to workspace size.
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        match chat.list_messages(token.as_ref(), &space.id, 1, None).await {
+                            Ok(page) => activity.push((
+                                space.id.0.clone(),
+                                page.items.last().map(|message| message.id.clone()),
+                            )),
+                            Err(
+                                crate::chat::ChatError::Unauthorized
+                                | crate::chat::ChatError::RateLimited,
+                            ) => break,
+                            Err(_) => {}
+                        }
+                    }
+                }
+                Some(AppMessage::SweepFinished { result, activity })
+            },
+        ))
+    }
+
     fn command_for_effect(&self, effect: Effect) -> Option<Command<AppMessage>> {
         let token = self.access_token.clone()?;
         let chat = Arc::clone(&self.chat);
@@ -194,16 +235,16 @@ impl App {
         match effect {
             Effect::LoadSpaces { request_id } => {
                 Some(Command::replace(CommandKey::new("spaces"), async move {
-                    let result = match chat.list_spaces(token.as_ref(), 100, None).await {
-                        Ok(mut page) => {
+                    let result = match chat.list_all_spaces(token.as_ref()).await {
+                        Ok(mut spaces) => {
                             chat.infer_direct_message_titles(
                                 token.as_ref(),
-                                &mut page.items,
+                                &mut spaces,
                                 &people,
                                 aliases.as_deref(),
                             )
                             .await;
-                            Ok((page.items, page.next_page_token))
+                            Ok((spaces, None))
                         }
                         Err(error) => Err(error),
                     };
@@ -780,8 +821,21 @@ impl Program for App {
     ) -> Result<Update<Self::Message>, Self::Error> {
         match event {
             RuntimeEvent::Terminal(event) => Ok(self.update_terminal(event)),
-            RuntimeEvent::Message(AppMessage::Start) => {
-                Ok(startup_update(self).with_command(poll_timer(5)))
+            RuntimeEvent::Message(AppMessage::Start) => Ok(startup_update(self)
+                .with_command(poll_timer(5))
+                .with_command(sweep_timer(1))),
+            RuntimeEvent::Message(AppMessage::Sweep) => Ok(self.start_sweep()),
+            RuntimeEvent::Message(AppMessage::SweepFinished { result, activity }) => {
+                let delay = if result.is_ok() { 60 } else { 120 };
+                if let Ok(spaces) = result {
+                    self.product.reconcile_spaces(spaces);
+                    for (space, latest) in activity {
+                        self.product.observe_activity(&space, latest.as_ref());
+                    }
+                    self.rebuild_projections();
+                    sync_space_selection(self);
+                }
+                Ok(Update::reset().with_command(sweep_timer(delay)))
             }
             RuntimeEvent::Message(AppMessage::Poll) => {
                 if !self.auth_menu
@@ -862,6 +916,13 @@ impl Program for App {
             RuntimeEvent::Timer(_) => Ok(Update::none()),
         }
     }
+}
+
+fn sweep_timer(seconds: u64) -> Command<AppMessage> {
+    Command::replace(CommandKey::new("sweep-timer"), async move {
+        tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+        Some(AppMessage::Sweep)
+    })
 }
 
 fn poll_timer(seconds: u64) -> Command<AppMessage> {
@@ -1039,7 +1100,15 @@ fn project_spaces(product: &ProductState) -> Vec<SelectableListItem> {
                     Line::from_spans(vec![
                         Span::styled(format!("{icon} "), Style::new().fg(ACCENT_STRONG)),
                         Span::styled(
-                            space.display_name.clone(),
+                            format!(
+                                "{}{}",
+                                if product.new_activity.contains(&space.id.0) {
+                                    "[new] "
+                                } else {
+                                    ""
+                                },
+                                space.display_name
+                            ),
                             Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
                         ),
                     ]),
