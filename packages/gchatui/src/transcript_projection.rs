@@ -24,6 +24,7 @@ pub struct TranscriptProjection {
     pub lines: Vec<Line>,
     pub items: Vec<TranscriptItem>,
     pub links: Vec<ThreadActivityLink>,
+    pub rich: Vec<(String, crate::model::RichContent)>,
 }
 
 #[derive(Debug)]
@@ -44,6 +45,7 @@ pub fn project(
         .collect::<BTreeSet<_>>();
     let mut lines = Vec::new();
     let mut activity_links = Vec::new();
+    let mut rich = Vec::new();
     let mut root_lines = BTreeMap::<ThreadId, usize>::new();
     let mut index = 0;
 
@@ -54,7 +56,8 @@ pub fn project(
             && message.id == group.root.id
         {
             root_lines.insert(thread_id.clone(), lines.len());
-            append_message(&mut lines, group.root, false, &sender_label, colors);
+            let root = group.root;
+            append_message(&mut lines, &mut rich, root, false, &sender_label, colors);
             if !group.replies.is_empty() {
                 lines.push(Line::from_spans([
                     Span::styled("  ┌─ ", Style::new().fg(colors.border)),
@@ -72,7 +75,7 @@ pub fn project(
                     ),
                 ]));
                 for reply in &group.replies {
-                    append_message(&mut lines, reply, true, &sender_label, colors);
+                    append_message(&mut lines, &mut rich, reply, true, &sender_label, colors);
                 }
                 lines.push(Line::from_spans([Span::styled(
                     "  └─",
@@ -131,16 +134,17 @@ pub fn project(
             continue;
         }
 
-        append_message(&mut lines, message, false, &sender_label, colors);
+        append_message(&mut lines, &mut rich, message, false, &sender_label, colors);
         index += 1;
     }
 
-    finalize_projection(lines, activity_links)
+    finalize_projection(lines, activity_links, rich)
 }
 
 fn finalize_projection(
     lines: Vec<Line>,
     mut activity_links: Vec<ThreadActivityLink>,
+    rich: Vec<(String, crate::model::RichContent)>,
 ) -> TranscriptProjection {
     let items = lines
         .iter()
@@ -159,6 +163,7 @@ fn finalize_projection(
         lines,
         items,
         links: activity_links,
+        rich,
     }
 }
 
@@ -186,6 +191,7 @@ fn thread_groups(messages: &[Message]) -> BTreeMap<ThreadId, ThreadGroup<'_>> {
 
 fn append_message(
     lines: &mut Vec<Line>,
+    rich: &mut Vec<(String, crate::model::RichContent)>,
     message: &Message,
     reply: bool,
     sender_label: &impl Fn(&crate::model::Sender) -> String,
@@ -208,14 +214,33 @@ fn append_message(
         ),
     ]));
     for physical_line in normalized_message_lines(&message.text) {
-        lines.push(Line::from_spans([Span::styled(
-            format!("{indent}{physical_line}"),
+        lines.push(crate::rich_content::styled(
+            &format!("{indent}{physical_line}"),
             background.fg(colors.text),
+        ));
+    }
+    for content in &message.rich_content {
+        rich.push((format!("transcript-line-{}", lines.len()), content.clone()));
+        lines.push(Line::from_spans([Span::styled(
+            format!("{indent}◇ {}", crate::rich_content::plain(&content.title)),
+            background.fg(colors.accent).add_modifier(Modifier::BOLD),
         )]));
+        if content.image_url.is_some() {
+            for _ in 0..6 {
+                lines.push(Line::from(""));
+            }
+        } else {
+            for text in content.text.lines().take(3) {
+                lines.push(crate::rich_content::styled(
+                    text,
+                    background.fg(colors.text),
+                ));
+            }
+        }
     }
     if message.unsupported_content {
         lines.push(Line::from_spans([Span::styled(
-            format!("{indent}◇ Rich content is not available in the terminal"),
+            format!("{indent}◇ Unsupported content"),
             background.fg(colors.warning),
         )]));
     }
@@ -296,6 +321,7 @@ mod tests {
             create_time: time.to_string(),
             is_thread_reply: reply,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }
     }
 

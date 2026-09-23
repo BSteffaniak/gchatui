@@ -12,12 +12,14 @@ switchy   = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "mast
 age = { version = "0.12", features = ["ssh"] }
 anyhow = "1.0"
 base64 = "0.22"
+bmux_image = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master" }
 bmux_keyboard = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master" }
 bmux_text_edit = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master" }
 bmux_tui = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
     "crossterm",
 ] }
 bmux_tui_components = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
+    "modal-frame",
     "button",
     "key-hint-bar",
     "pane",
@@ -29,9 +31,18 @@ bmux_tui_components = { git = "https://github.com/BSteffaniak/bmux.git", branch 
 ] }
 bmux_tui_runtime = { git = "https://github.com/BSteffaniak/bmux.git", branch = "master", features = [
     "crossterm",
+    "image-kitty",
+    "image-sixel",
+    "image-iterm2",
 ] }
 dirs = "6.0"
 futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = [
     "form",
@@ -52,7 +63,10 @@ webbrowser = "1.0"
 zeroize = "1.0"
 
 
-tempfile = "3.0"
+tempfile           = "3.0"
+tracing            = "0.1"
+tracing-appender   = "0.2"
+tracing-subscriber = { version = "0.3", features = ["json"] }
 
 [workspace.lints.clippy]
 all                     = { level = "warn", priority = -1 }

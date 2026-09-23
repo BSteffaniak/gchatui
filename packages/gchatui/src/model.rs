@@ -48,6 +48,16 @@ pub struct Message {
     pub create_time: String,
     pub is_thread_reply: bool,
     pub unsupported_content: bool,
+    pub rich_content: Vec<RichContent>,
+}
+
+/// Read-only content independent of Google wire formats and terminal widgets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichContent {
+    pub title: String,
+    pub text: String,
+    pub image_url: Option<String>,
+    pub links: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

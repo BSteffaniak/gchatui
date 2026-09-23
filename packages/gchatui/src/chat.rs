@@ -440,6 +440,8 @@ struct MessageDto {
     #[serde(default)]
     text: String,
     #[serde(default)]
+    formatted_text: String,
+    #[serde(default)]
     create_time: String,
     thread: Option<ThreadDto>,
     sender: Option<UserDto>,
@@ -447,6 +449,8 @@ struct MessageDto {
     thread_reply: bool,
     #[serde(default)]
     cards_v2: Vec<serde_json::Value>,
+    #[serde(default)]
+    cards: Vec<serde_json::Value>,
     #[serde(default)]
     attachment: Vec<serde_json::Value>,
 }
@@ -475,10 +479,19 @@ impl From<MessageDto> for Message {
             id: MessageId(value.name),
             thread_id: value.thread.map(|thread| ThreadId(thread.name)),
             sender: value.sender.map(Into::into),
-            text: value.text,
+            text: if value.formatted_text.is_empty() {
+                value.text
+            } else {
+                value.formatted_text
+            },
             create_time: value.create_time,
             is_thread_reply: value.thread_reply,
-            unsupported_content: !value.cards_v2.is_empty() || !value.attachment.is_empty(),
+            unsupported_content: false,
+            rich_content: crate::chat_content::convert(
+                &value.cards_v2,
+                &value.cards,
+                &value.attachment,
+            ),
         }
     }
 }
@@ -649,7 +662,7 @@ mod tests {
             .unwrap();
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].text, "First");
-        assert!(page.items[1].unsupported_content);
+        assert!(!page.items[1].rich_content.is_empty());
         assert!(page.items[1].thread_id.is_some());
     }
 

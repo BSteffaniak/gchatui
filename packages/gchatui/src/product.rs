@@ -470,6 +470,7 @@ mod tests {
             create_time: time.to_string(),
             is_thread_reply: false,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }
     }
 

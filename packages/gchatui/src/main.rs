@@ -4,21 +4,39 @@ mod app;
 pub mod auth;
 pub mod auth_command;
 pub mod chat;
+mod chat_content;
 mod config;
 pub mod credential;
 mod date_display;
+mod diagnostics;
 mod google_http;
 mod keybind;
+mod media_probe;
 pub mod model;
 pub mod oauth;
 mod official_oauth;
 pub mod people;
 pub mod product;
+mod rich_content;
 pub mod sender_alias;
 pub mod transcript_projection;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let logging = diagnostics::init()?;
+    tracing::info!(target: "gchatui::diagnostics", version = env!("CARGO_PKG_VERSION"), "application_start");
+    let result = run().await;
+    tracing::info!(target: "gchatui::diagnostics", success = result.is_ok(), "application_stop");
+    if result.is_err() {
+        eprintln!("Diagnostic logs: {}", logging.directory.display());
+    }
+    result
+}
+
+async fn run() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--diagnose-media") {
+        return media_probe::run().await;
+    }
     let path = config::default_config_path();
     let mut config = config::load(path.as_deref())?;
     let mut access_token = if config.session_only {

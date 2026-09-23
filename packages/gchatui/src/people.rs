@@ -577,6 +577,7 @@ mod tests {
             create_time: "2026-01-01T00:00:00Z".to_string(),
             is_thread_reply: false,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }];
         PeopleClient::with_directory_base_url(Url::parse(&format!("http://{address}/")).unwrap())
             .resolve_message_senders(&Zeroizing::new("test".to_string()), &mut messages)
@@ -615,6 +616,7 @@ mod tests {
             create_time: "2026-01-01T00:00:00Z".to_string(),
             is_thread_reply: false,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }];
         PeopleClient::with_base_url(Url::parse(&format!("http://{address}/")).unwrap())
             .resolve_message_senders(&Zeroizing::new("test".to_string()), &mut messages)
@@ -658,6 +660,7 @@ mod tests {
             create_time: "2026-01-01T00:00:00Z".to_string(),
             is_thread_reply: false,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }];
         PeopleClient::with_base_url(Url::parse(&format!("http://{address}/")).unwrap())
             .resolve_message_senders(&Zeroizing::new("test".to_string()), &mut messages)

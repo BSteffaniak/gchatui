@@ -63,6 +63,29 @@ startup. Use `%%` for a literal percent sign.
 Original timestamps are retained for ordering. Unrecognized timestamps are
 displayed unchanged.
 
+## Diagnostic logs
+
+Structured JSON tracing is enabled by default and written to
+`<gchatui state directory>/logs/gchatui.YYYY-MM-DD.log`. On macOS this is
+`~/Library/Application Support/gchatui/logs`; on Linux it is
+`${XDG_STATE_HOME:-~/.local/state}/gchatui/logs`. Logs rotate daily, retaining
+at most seven files. The writer is flushed at normal shutdown and does not write
+into the terminal UI. Initialization failures are reported before entering the TUI.
+
+Image events include process-local correlation IDs, request/redirect stages,
+HTTP status, allowlisted content-type categories, byte counts, elapsed time,
+and sanitized failure categories. Preview-limit counts are also logged.
+Only the dedicated application diagnostic target is enabled: dependency traces,
+URLs, account/resource identifiers, credentials, response bodies, and raw server
+or decoder errors are excluded. Do not commit runtime logs or private captures.
+
+`gchatui --diagnose-media` performs a bounded read-only media probe using an
+existing convenience-mode app vault. It does not prompt, create credentials, or
+start a browser login. It examines at most 30 spaces and four media candidates,
+printing only sanitized metadata and preview outcomes; payloads stay in memory.
+Passphrase-protected and session-only configurations require diagnosis through
+the normal authenticated UI instead.
+
 ## Development
 
 Install stable Rust, then run:

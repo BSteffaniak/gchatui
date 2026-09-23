@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+mod rich;
 use std::io::{Stdout, stdout};
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use bmux_tui::buffer::Buffer;
 use bmux_tui::component::{Component, Constraints, LayoutCx, LayoutId, LayoutNode, LogicalSize};
 use bmux_tui::crossterm::{CrosstermTerminalGuard, terminal_size};
 use bmux_tui::event::{Event, MouseButton, MouseEventKind};
+#[cfg(test)]
 use bmux_tui::frame::Frame;
 use bmux_tui::geometry::{Insets, Rect, Size};
 use bmux_tui::hit::{HitId, HitMap, HitRegion, HitRole};
@@ -36,8 +38,8 @@ use bmux_tui_components::text_input::{TextInputControl, TextInputOutcome, TextIn
 use bmux_tui_components::text_input_box::{TextInputBoxComponent, TextInputBoxPolicy};
 use bmux_tui_components::virtual_list::{VirtualList, VirtualListState};
 use bmux_tui_runtime::{
-    Command, CommandKey, Lifecycle, Program, Runtime, RuntimeConfig, RuntimeEvent, TerminalInput,
-    TerminalPresenter, Update,
+    Command, CommandKey, ImageTerminalPresenter, Lifecycle, Program, Runtime, RuntimeConfig,
+    RuntimeEvent, TerminalInput, Update,
 };
 
 use crate::chat::ChatClient;
@@ -67,6 +69,11 @@ const ERROR: Color = Color::Rgb(248, 113, 113);
 #[derive(Debug)]
 pub enum AppMessage {
     Start,
+    ImagesLoaded {
+        generation: u64,
+        space: Option<String>,
+        images: crate::rich_content::Images,
+    },
     Product(ProductMessage),
     MessagesWithIdentity {
         message: ProductMessage,
@@ -88,6 +95,14 @@ pub enum AppMessage {
 }
 
 pub struct App {
+    image_auth: Option<Arc<crate::auth::AuthManager>>,
+    image_generation: u64,
+    rich_items: Vec<(String, crate::model::RichContent)>,
+    images: crate::rich_content::Images,
+    image_protocol: Option<bmux_image::ImageProtocol>,
+    rich_focus: Option<usize>,
+    viewer: Option<rich::Viewer>,
+    viewer_area: Rect,
     bindings: KeybindingRegistry,
     clock_format: crate::date_display::ClockFormat,
     timestamp_format: Option<crate::date_display::TimestampFormat>,
@@ -148,6 +163,14 @@ enum FocusedPane {
 impl App {
     pub fn new(bindings: KeybindingRegistry) -> Self {
         Self {
+            image_auth: None,
+            image_generation: 0,
+            rich_items: Vec::new(),
+            images: crate::rich_content::Images::new(),
+            image_protocol: None,
+            rich_focus: None,
+            viewer: None,
+            viewer_area: Rect::new(0, 0, 0, 0),
             bindings,
             clock_format: crate::date_display::ClockFormat::default(),
             timestamp_format: None,
@@ -193,6 +216,11 @@ impl App {
             self.clock_format,
             self.timestamp_format.as_ref(),
         );
+        if self.rich_items != projection.rich {
+            self.rich_focus = None;
+            self.viewer = None;
+        }
+        self.rich_items = projection.rich;
         self.conversation_lines = Arc::new(projection.lines);
         self.conversation_items = Arc::new(projection.items);
         self.thread_activity_links = Arc::new(projection.links);
@@ -281,7 +309,11 @@ impl App {
             self.follow_conversation_bottom = true;
         }
         sync_space_selection(self);
-        Update::reset()
+        if messages_loaded {
+            Update::reset().with_command(self.load_images())
+        } else {
+            Update::reset()
+        }
     }
 
     fn enrich_message(&self, message: &ProductMessage) -> Option<Command<AppMessage>> {
@@ -314,7 +346,9 @@ impl App {
         ))
     }
 
-    fn command_for_effect(&self, effect: Effect) -> Option<Command<AppMessage>> {
+    fn command_for_effect(&mut self, effect: Effect) -> Option<Command<AppMessage>> {
+        self.image_generation = self.image_generation.wrapping_add(1);
+        self.viewer = None;
         let token = self.access_token.clone()?;
         let chat = Arc::clone(&self.chat);
         let people = Arc::clone(&self.people);
@@ -534,6 +568,9 @@ impl App {
     fn handle_thread_activity_event(&mut self, event: &Event) -> Option<Update<AppMessage>> {
         let route = self.interactions.route(event.clone());
         let target = route.target.as_ref()?.as_str();
+        if let Some(update) = self.rich_target(target, event) {
+            return Some(update);
+        }
         let index = self
             .thread_activity_links
             .iter()
@@ -553,7 +590,7 @@ impl App {
             let area = conversation_content_area(self.conversation_pane.area);
             let target_key = self.thread_activity_links[index].target_key.clone();
             self.conversation_view
-                .scroll_to_key(&target_key, usize::from(area.height));
+                .scroll_to_key(&target_key, u64::from(area.height));
             self.follow_conversation_bottom = false;
         }
         Some(Update::redraw())
@@ -576,7 +613,7 @@ impl App {
         if self.conversation_pane.area.contains(mouse.position) {
             let current =
                 i32::try_from(self.conversation_view.scroll.vertical_offset()).unwrap_or(i32::MAX);
-            let next = usize::try_from(current.saturating_add(delta).max(0)).unwrap_or(usize::MAX);
+            let next = u64::try_from(current.saturating_add(delta).max(0)).unwrap_or(u64::MAX);
             if next == self.conversation_view.scroll.vertical_offset() {
                 return Some(Update::none());
             }
@@ -586,7 +623,7 @@ impl App {
         }
         if self.space_pane.area.contains(mouse.position) {
             let current = i32::try_from(self.spaces.vertical_scroll()).unwrap_or(i32::MAX);
-            let next = usize::try_from(current.saturating_add(delta).max(0)).unwrap_or(usize::MAX);
+            let next = u64::try_from(current.saturating_add(delta).max(0)).unwrap_or(u64::MAX);
             if next == self.spaces.vertical_scroll() {
                 return Some(Update::none());
             }
@@ -646,6 +683,9 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn update_terminal(&mut self, event: Event) -> Update<AppMessage> {
+        if let Some(update) = self.handle_rich(&event) {
+            return update;
+        }
         if self.auth_menu {
             return self.handle_auth_menu(&event);
         }
@@ -758,7 +798,7 @@ impl App {
         match self.focused_pane {
             FocusedPane::Spaces => {
                 let area = space_list_area(self.space_pane.area);
-                let amount = usize::from(area.height.max(1));
+                let amount = u64::from(area.height.max(1));
                 let next = match action {
                     Action::PageDown => self.spaces.vertical_scroll().saturating_add(amount),
                     Action::PageUp => self.spaces.vertical_scroll().saturating_sub(amount),
@@ -772,7 +812,7 @@ impl App {
             }
             FocusedPane::Conversation => {
                 let area = conversation_content_area(self.conversation_pane.area);
-                let amount = isize::try_from(area.height.max(1)).unwrap_or(isize::MAX);
+                let amount = i64::from(area.height.max(1));
                 match action {
                     Action::PageDown => self.conversation_view.scroll.set_vertical_offset(
                         self.conversation_view
@@ -788,9 +828,7 @@ impl App {
                     ),
                     Action::GoTop => self.conversation_view.scroll.set_vertical_offset(0),
                     Action::GoBottom => {
-                        self.conversation_view
-                            .scroll
-                            .set_vertical_offset(usize::MAX);
+                        self.conversation_view.scroll.set_vertical_offset(u64::MAX);
                         self.conversation_view.scroll.set_follow_bottom(true);
                     }
                     _ => {}
@@ -962,9 +1000,11 @@ impl Program for App {
                     self.follow_conversation_bottom = true;
                 }
                 sync_space_selection(self);
-                Ok(enrichment.map_or_else(Update::reset, |command| {
-                    Update::reset().with_command(command)
-                }))
+                Ok(enrichment
+                    .map_or_else(Update::reset, |command| {
+                        Update::reset().with_command(command)
+                    })
+                    .with_command(self.load_images()))
             }
             RuntimeEvent::Message(AppMessage::NamesResolved {
                 current_user,
@@ -982,6 +1022,16 @@ impl Program for App {
             }
             RuntimeEvent::Message(AppMessage::Product(message)) => {
                 Ok(self.apply_product_message(message))
+            }
+            RuntimeEvent::Message(AppMessage::ImagesLoaded {
+                generation,
+                space,
+                images,
+            }) => {
+                if generation == self.image_generation && space == self.product.selected_space {
+                    self.images = images;
+                }
+                Ok(Update::redraw())
             }
             RuntimeEvent::Message(AppMessage::InputError(error)) => Err(error),
             RuntimeEvent::Timer(_) => Ok(Update::none()),
@@ -1017,20 +1067,26 @@ pub async fn run(
         let writer = guard.writer_mut().expect("guard should own stdout");
         let size = terminal_size()?;
         let terminal = Terminal::new(writer, Rect::new(0, 0, size.width, size.height));
-        let presenter = TerminalPresenter::with_commit(
+        let capabilities = bmux_image::host_caps::detect_from_env();
+        let image_protocol = capabilities.preferred_protocol();
+        let presenter = ImageTerminalPresenter::with_commit(
             terminal,
             render,
             |app: &mut App, hits: &HitMap, _focus: &bmux_tui::focus::FocusTrap| {
                 app.interactions.commit_scene(hits.clone(), None);
             },
+            capabilities,
+            bmux_image::ImageConfig::default(),
         );
         let mut app = App::new(bindings);
+        app.image_protocol = image_protocol;
         app.clock_format = clock_format;
         app.timestamp_format = timestamp_format;
         app.aliases = aliases;
         app.auth_menu = show_auth;
         app.auth_result = Arc::clone(&auth_result);
         let startup = access_token.map(|auth| {
+            app.image_auth = Some(Arc::clone(&auth));
             app.chat = Arc::new(ChatClient::with_auth(Arc::clone(&auth)));
             app.people = Arc::new(PeopleClient::with_auth(auth));
             app.access_token = Some(Arc::new(zeroize::Zeroizing::new(String::new())));
@@ -1050,11 +1106,18 @@ pub async fn run(
             let _ = handle.send(AppMessage::Start).await;
         }
         match runtime.run().await {
-            Ok(_) => Ok(()),
-            Err(
-                bmux_tui_runtime::RuntimeError::Program { error, .. }
-                | bmux_tui_runtime::RuntimeError::Presenter { error, .. },
-            ) => Err(error),
+            Ok(mut output) => output
+                .presenter
+                .cleanup_images()
+                .map_err(anyhow::Error::from),
+            Err(bmux_tui_runtime::RuntimeError::Program { error, mut output }) => {
+                let _ = output.presenter.cleanup_images();
+                Err(anyhow::Error::from(error))
+            }
+            Err(bmux_tui_runtime::RuntimeError::Presenter { error, mut output }) => {
+                let _ = output.presenter.cleanup_images();
+                Err(anyhow::Error::from(error))
+            }
         }
     };
     let _stdout: Stdout = guard.leave()?;
@@ -1225,6 +1288,7 @@ fn project_conversation(
                 line,
             }],
             links: Vec::new(),
+            rich: Vec::new(),
         };
     }
     let mut display_messages = product.messages.clone();
@@ -1331,7 +1395,12 @@ impl Component for EmptyComponent {
     fn paint(&self, _layout: &LayoutNode, _cx: &mut PaintCx<'_, '_>) {}
 }
 
-fn paint_component(frame: &mut Frame<'_>, area: Rect, component: &impl Component) {
+fn raster_area(cx: &PaintCx<'_, '_>) -> Rect {
+    cx.project_raster_rect(cx.area())
+        .unwrap_or(Rect::new(0, 0, 0, 0))
+}
+
+fn paint_component(frame: &mut PaintCx<'_, '_>, area: Rect, component: &impl Component) {
     if area.is_empty() {
         return;
     }
@@ -1339,7 +1408,7 @@ fn paint_component(frame: &mut Frame<'_>, area: Rect, component: &impl Component
         Constraints::tight(Size::new(area.width, area.height)),
         &mut LayoutCx::new(),
     );
-    PaintCx::new(frame).with_child(
+    frame.with_child(
         i32::from(area.x),
         i64::from(area.y),
         LocalRect::new(0, 0, area.width, area.height),
@@ -1348,9 +1417,9 @@ fn paint_component(frame: &mut Frame<'_>, area: Rect, component: &impl Component
 }
 
 #[allow(clippy::too_many_lines)]
-fn render(app: &mut App, frame: &mut Frame<'_>) {
-    let area = frame.area();
-    PaintCx::new(frame).fill(
+fn render(app: &mut App, frame: &mut PaintCx<'_, '_>) {
+    let area = raster_area(frame);
+    frame.fill(
         LocalRect::terminal(area),
         " ",
         Style::new().bg(CANVAS).fg(TEXT),
@@ -1441,20 +1510,20 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
 
     let spaces = Arc::clone(&app.space_items);
     let list_area = space_list_area(spaces_area);
-    PaintCx::new(frame).fill(
+    frame.fill(
         LocalRect::terminal(list_area),
         " ",
         Style::new().bg(SURFACE),
     );
-    spaces_list(spaces.as_slice()).render_with_fallback_style(
+    spaces_list(spaces.as_slice()).paint(
         list_area,
         &app.spaces,
-        frame,
         Style::new().fg(TEXT).bg(SURFACE),
+        frame,
     );
 
     let conversation_area = conversation_content_area(conversation_area);
-    PaintCx::new(frame).fill(
+    frame.fill(
         LocalRect::terminal(conversation_area),
         " ",
         Style::new().bg(SURFACE),
@@ -1463,18 +1532,18 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     let conversation_list = transcript_list(conversation_items.as_slice());
     app.conversation_view.capture_anchor();
     conversation_list.sync(
-        conversation_area.width,
+        u64::from(conversation_area.width),
         &mut app.conversation_view,
         &mut LayoutCx::new(),
     );
     app.conversation_view
-        .restore_anchor(usize::from(conversation_area.height));
+        .restore_anchor(u64::from(conversation_area.height));
     if app.follow_conversation_bottom {
-        app.conversation_view.scroll.set_vertical_offset(usize::MAX);
+        app.conversation_view.scroll.set_vertical_offset(u64::MAX);
         app.conversation_view.scroll.set_follow_bottom(true);
         app.follow_conversation_bottom = false;
     }
-    PaintCx::new(frame).with_child(
+    frame.with_child(
         i32::from(conversation_area.x),
         i64::from(conversation_area.y),
         LocalRect::new(0, 0, conversation_area.width, conversation_area.height),
@@ -1492,6 +1561,7 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
         },
     );
 
+    rich::paint_inline(app, frame, conversation_area);
     let footer_y = area
         .y
         .saturating_add(header_height)
@@ -1527,6 +1597,7 @@ fn render(app: &mut App, frame: &mut Frame<'_>) {
     if app.help_visible {
         paint_component(frame, app.conversation_pane.area, &HelpComponent(app));
     }
+    rich::paint_viewer(app, frame);
     let status_text = status_text(app);
     let severity = status_severity(app.product.phase);
     let status = [StatusSegment::new(status_text).severity(severity)];
@@ -1556,7 +1627,7 @@ impl Component for HeaderComponent<'_> {
         LayoutNode::leaf(
             LayoutId::new("header"),
             constraints.constrain(LogicalSize::new(
-                u16::try_from(width).unwrap_or(u16::MAX),
+                u64::try_from(width).unwrap_or(u64::MAX),
                 2,
             )),
         )
@@ -1569,7 +1640,7 @@ impl Component for HeaderComponent<'_> {
             Rect::new(
                 0,
                 0,
-                layout.size.width,
+                u16::try_from(layout.size.width).unwrap_or(u16::MAX),
                 u16::try_from(layout.size.height).unwrap_or(u16::MAX),
             ),
         );
@@ -1857,7 +1928,7 @@ fn auth_option_area(area: Rect, index: usize) -> Rect {
     )
 }
 
-fn render_auth_button(app: &App, frame: &mut Frame<'_>) {
+fn render_auth_button(app: &App, frame: &mut PaintCx<'_, '_>) {
     paint_component(
         frame,
         auth_button_area(footer_area(app)),
@@ -1870,7 +1941,7 @@ fn render_auth_button(app: &App, frame: &mut Frame<'_>) {
     );
 }
 
-fn render_auth_menu(app: &App, frame: &mut Frame<'_>) {
+fn render_auth_menu(app: &App, frame: &mut PaintCx<'_, '_>) {
     let area = alias_picker_area(app.conversation_pane.area);
     let title = format!(
         "Sign in · {} selects · {} cancels",
@@ -1914,7 +1985,7 @@ fn render_auth_menu(app: &App, frame: &mut Frame<'_>) {
     }
 }
 
-fn render_alias_picker(app: &mut App, frame: &mut Frame<'_>) {
+fn render_alias_picker(app: &mut App, frame: &mut PaintCx<'_, '_>) {
     let area = alias_picker_area(app.conversation_pane.area);
     let Some(picker) = app.alias_picker.as_mut() else {
         return;
@@ -1940,11 +2011,11 @@ fn render_alias_picker(app: &mut App, frame: &mut Frame<'_>) {
         area,
         &PaneComponent::new("dialog-pane", panel, &state, EmptyComponent),
     );
-    spaces_list(&picker.items).render_with_fallback_style(
+    spaces_list(&picker.items).paint(
         inner_area,
         &picker.state,
-        frame,
         Style::new().bg(SURFACE_RAISED).fg(TEXT),
+        frame,
     );
 }
 
@@ -1970,7 +2041,7 @@ fn alias_editor_content_area(area: Rect) -> Rect {
     )
 }
 
-fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
+fn render_alias_editor(app: &mut App, frame: &mut PaintCx<'_, '_>) {
     let area = alias_editor_area(app.conversation_pane.area);
     let Some(editor) = app.alias_editor.as_mut() else {
         return;
@@ -1995,7 +2066,7 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
         &PaneComponent::new("dialog-pane", panel, &state, EmptyComponent),
     );
     let content = alias_editor_content_area(app.conversation_pane.area);
-    PaintCx::new(frame).fill(
+    frame.fill(
         LocalRect::terminal(content),
         " ",
         Style::new().bg(SURFACE_RAISED),
@@ -2011,7 +2082,7 @@ fn render_alias_editor(app: &mut App, frame: &mut Frame<'_>) {
     if let Some(error) = editor.error.as_deref() {
         input = input.error(error);
     }
-    PaintCx::new(frame).write_line_with_fallback_style(
+    frame.write_line_with_fallback_style(
         LocalRect::terminal(Rect::new(
             content.x,
             content.y.saturating_add(content.height.saturating_sub(1)),
@@ -2081,7 +2152,7 @@ impl Component for HelpComponent<'_> {
         LayoutNode::leaf(
             LayoutId::new("help"),
             constraints.constrain(LogicalSize::new(
-                u16::try_from(width).unwrap_or(u16::MAX),
+                u64::try_from(width).unwrap_or(u64::MAX),
                 12,
             )),
         )
@@ -2094,7 +2165,7 @@ impl Component for HelpComponent<'_> {
             Rect::new(
                 0,
                 0,
-                layout.size.width,
+                u16::try_from(layout.size.width).unwrap_or(u16::MAX),
                 u16::try_from(layout.size.height).unwrap_or(u16::MAX),
             ),
         );
@@ -2173,7 +2244,7 @@ fn interactive_pane() -> Pane<'static> {
 fn render_to_buffer_and_hits(app: &mut App, area: Rect) -> (Buffer, HitMap) {
     let mut buffer = Buffer::empty(area);
     let mut frame = Frame::new(&mut buffer);
-    render(app, &mut frame);
+    render(app, &mut PaintCx::new(&mut frame));
     let hits = frame.hits().clone();
     drop(frame);
     (buffer, hits)
@@ -2253,7 +2324,7 @@ mod tests {
             let header = HeaderComponent(&app);
             let layout =
                 header.layout(Constraints::loose(Size::new(100, 10)), &mut LayoutCx::new());
-            assert_eq!(layout.size, LogicalSize::new(expected_width, 2));
+            assert_eq!(layout.size, LogicalSize::new(u64::from(expected_width), 2));
             let mut buffer = Buffer::empty(Rect::new(0, 0, expected_width, 2));
             let mut frame = Frame::new(&mut buffer);
             header.paint(&layout, &mut PaintCx::new(&mut frame));
@@ -2441,6 +2512,7 @@ mod tests {
             create_time: "10:42".to_string(),
             is_thread_reply: false,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }];
         let _ = app.open_alias_editor();
         assert!(app.alias_picker.is_some());
@@ -2515,6 +2587,7 @@ mod tests {
                 create_time: format!("{index:03}"),
                 is_thread_reply: false,
                 unsupported_content: false,
+                rich_content: Vec::new(),
             });
         }
         app.product.phase = Phase::Ready;
@@ -2543,6 +2616,78 @@ mod tests {
     }
 
     #[test]
+    fn rich_preview_opens_with_mouse_and_keyboard_and_restores_scroll() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.phase = Phase::Ready;
+        app.product.messages = vec![crate::model::Message {
+            id: crate::model::MessageId("synthetic-rich".into()),
+            thread_id: None,
+            sender: None,
+            text: "Example".into(),
+            create_time: String::new(),
+            is_thread_reply: false,
+            unsupported_content: false,
+            rich_content: vec![crate::model::RichContent {
+                title: "Example card".into(),
+                text: "<b>Full content</b>".into(),
+                image_url: None,
+                links: Vec::new(),
+            }],
+        }];
+        app.rebuild_projections();
+        let (_, hits) = render_to_buffer_and_hits(&mut app, Rect::new(0, 0, 100, 30));
+        app.interactions.commit_scene(hits, None);
+        let area = conversation_content_area(app.conversation_pane.area);
+        let row = app
+            .conversation_view
+            .item_offset(&app.rich_items[0].0)
+            .unwrap();
+        let point = Point::new(area.x + 1, area.y + u16::try_from(row).unwrap());
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.update_terminal(Event::Mouse(MouseEvent::new(kind, point)));
+        }
+        assert!(app.viewer.is_some());
+        let before = app.conversation_view.scroll.vertical_offset();
+        let cancel = app.bindings.labels_for(Action::Cancel)[0]
+            .parse::<crate::keybind::KeyChord>()
+            .unwrap()
+            .stroke();
+        app.update_terminal(Event::Key(cancel));
+        assert!(app.viewer.is_none());
+        assert_eq!(app.conversation_view.scroll.vertical_offset(), before);
+        app.focused_pane = FocusedPane::Conversation;
+        let activate = app.bindings.labels_for(Action::Activate)[0]
+            .parse::<crate::keybind::KeyChord>()
+            .unwrap()
+            .stroke();
+        app.update_terminal(Event::Key(activate));
+        assert!(app.viewer.is_some());
+        let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 30));
+        assert!(buffer.cells().iter().any(|cell| cell.symbol == "F"));
+    }
+
+    #[test]
+    fn stale_image_generation_cannot_replace_current_media() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.image_generation = 2;
+        let mut images = crate::rich_content::Images::new();
+        images.insert(
+            "https://example.com/synthetic.png".into(),
+            Err(crate::rich_content::ImageError::Network),
+        );
+        app.update(RuntimeEvent::Message(AppMessage::ImagesLoaded {
+            generation: 1,
+            space: None,
+            images,
+        }))
+        .unwrap();
+        assert!(app.images.is_empty());
+    }
+
+    #[test]
     fn thread_activity_click_jumps_to_wrapped_root() {
         let mut app = App::new(KeybindingRegistry::default());
         app.product.messages = vec![
@@ -2554,6 +2699,7 @@ mod tests {
                 create_time: "09:00".to_string(),
                 is_thread_reply: false,
                 unsupported_content: false,
+            rich_content: Vec::new(),
             },
             crate::model::Message {
                 id: crate::model::MessageId("ordinary".to_string()),
@@ -2563,6 +2709,7 @@ mod tests {
                 create_time: "09:05".to_string(),
                 is_thread_reply: false,
                 unsupported_content: false,
+            rich_content: Vec::new(),
             },
             crate::model::Message {
                 id: crate::model::MessageId("reply".to_string()),
@@ -2572,11 +2719,12 @@ mod tests {
                 create_time: "09:10".to_string(),
                 is_thread_reply: true,
                 unsupported_content: false,
+            rich_content: Vec::new(),
             },
         ];
         app.product.phase = Phase::Ready;
         app.rebuild_projections();
-        app.conversation_view.scroll.set_vertical_offset(usize::MAX);
+        app.conversation_view.scroll.set_vertical_offset(u64::MAX);
         let (_buffer, hits) = render_to_buffer_and_hits(&mut app, Rect::new(0, 0, 70, 16));
         app.interactions.commit_scene(hits, None);
         let link = app.thread_activity_links.first().unwrap();
@@ -2606,6 +2754,7 @@ mod tests {
                 create_time: format!("10:4{index}"),
                 is_thread_reply: index > 0,
                 unsupported_content: false,
+                rich_content: Vec::new(),
             })
             .collect();
         app.rebuild_projections();
@@ -2630,6 +2779,7 @@ mod tests {
             create_time: "10:42".to_string(),
             is_thread_reply: false,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }];
         app.rebuild_projections();
 
@@ -2656,6 +2806,7 @@ mod tests {
             create_time: "10:42".to_string(),
             is_thread_reply: false,
             unsupported_content: false,
+            rich_content: Vec::new(),
         }];
         app.rebuild_projections();
         let rendered = app
