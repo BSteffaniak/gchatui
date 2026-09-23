@@ -18,50 +18,98 @@ pub(super) struct Viewer {
 }
 
 impl App {
-    pub(super) fn load_images(&mut self) -> Command<AppMessage> {
+    pub(super) fn reconcile_viewer(&mut self, items: &[(String, crate::model::RichContent)]) {
+        if self.viewer.as_ref().is_some_and(|viewer| {
+            !items.iter().any(|(_, content)| {
+                content.image_url == viewer.content.image_url
+                    && content.title == viewer.content.title
+                    && content.text == viewer.content.text
+            })
+        }) {
+            self.viewer = None;
+        }
+    }
+
+    fn wanted_images(&self) -> Vec<String> {
+        if let Some(viewer) = &self.viewer {
+            return viewer.content.image_url.iter().cloned().collect();
+        }
+        let start = self.conversation_view.scroll.vertical_offset();
+        let end = start.saturating_add(u64::from(
+            conversation_content_area(self.conversation_pane.area).height,
+        ));
+        self.rich_items
+            .iter()
+            .filter(|(key, _)| {
+                self.conversation_view
+                    .item_offset(key)
+                    .is_some_and(|offset| offset < end && offset.saturating_add(7) > start)
+            })
+            .filter_map(|(_, content)| content.image_url.clone())
+            .collect()
+    }
+
+    pub(super) fn merge_images(&mut self, images: crate::rich_content::Images) {
+        for url in images.keys() {
+            if !self.image_recency.contains(url) {
+                self.image_recency.insert(0, url.clone());
+            }
+        }
+        self.images.extend(images);
+        self.trim_images();
+    }
+
+    pub(super) fn trim_images(&mut self) {
+        let wanted = self.wanted_images();
+        while self.images.len() > 32 {
+            let Some(index) = self
+                .image_recency
+                .iter()
+                .position(|url| self.images.contains_key(url) && !wanted.contains(url))
+            else {
+                break;
+            };
+            let url = self.image_recency.remove(index);
+            self.images.remove(&url);
+        }
+    }
+
+    pub(super) fn schedule_images(&mut self) -> Update<AppMessage> {
+        let wanted = self.wanted_images();
+        self.image_recency
+            .retain(|url| self.images.contains_key(url) || wanted.contains(url));
+        for url in &wanted {
+            self.image_recency.retain(|entry| entry != url);
+            self.image_recency.push(url.clone());
+        }
+        if self.image_loading.is_some() {
+            return Update::none();
+        }
+        let urls = wanted
+            .into_iter()
+            .filter(|url| !self.images.contains_key(url))
+            .take(4)
+            .collect::<Vec<_>>();
+        if urls.is_empty() {
+            return Update::none();
+        }
+        self.image_loading = Some(self.image_generation.wrapping_add(1));
         self.image_generation = self.image_generation.wrapping_add(1);
         let generation = self.image_generation;
-        let allowed = self
-            .rich_items
-            .iter()
-            .filter_map(|(_, content)| content.image_url.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        self.images
-            .retain(|url, _| allowed.iter().take(16).any(|allowed| allowed == url));
         let space = self.product.selected_space.clone();
-        tracing::info!(target: "gchatui::diagnostics", generation, image_count = allowed.len(), limited_count = allowed.len().saturating_sub(16), "image_batch");
-        for url in allowed.iter().skip(16) {
-            self.images
-                .insert(url.clone(), Err(crate::rich_content::ImageError::Limit));
-        }
-        let cached = self
-            .images
-            .iter()
-            .filter(|(_, result)| result.is_ok())
-            .map(|(url, image)| (url.clone(), image.clone()))
-            .collect::<crate::rich_content::Images>();
-        let urls = self
-            .rich_items
-            .iter()
-            .filter_map(|(_, content)| content.image_url.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .take(16)
-            .filter(|url| !cached.contains_key(url))
-            .collect();
         let auth = self.image_auth.clone();
-        Command::replace(CommandKey::new("rich-images"), async move {
-            let mut images = cached;
-            images.extend(crate::rich_content::load(urls, auth).await);
-            for url in allowed.into_iter().skip(16) {
-                images.insert(url, Err(crate::rich_content::ImageError::Limit));
-            }
-            Some(AppMessage::ImagesLoaded {
-                generation,
-                space,
-                images,
-            })
-        })
+        tracing::info!(target: "gchatui::diagnostics", generation, image_count = urls.len(), cached_count = self.images.len(), "image_batch");
+        Update::none().with_command(Command::replace(
+            CommandKey::new("rich-images"),
+            async move {
+                let images = crate::rich_content::load(urls, auth).await;
+                Some(AppMessage::ImagesLoaded {
+                    generation,
+                    space,
+                    images,
+                })
+            },
+        ))
     }
 
     pub(super) fn handle_rich(&mut self, event: &Event) -> Option<Update<AppMessage>> {
@@ -296,7 +344,7 @@ pub(super) fn paint_inline(app: &App, frame: &mut PaintCx<'_, '_>, area: Rect) {
                 hit.width.min(40),
                 hit.height.saturating_sub(1),
             );
-            paint_image(app, frame, url, destination, &format!("inline-{index}"));
+            paint_image(app, frame, url, destination, &format!("inline-{url}"));
         }
     }
 }

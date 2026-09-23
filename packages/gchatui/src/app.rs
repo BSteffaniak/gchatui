@@ -97,6 +97,9 @@ pub enum AppMessage {
 pub struct App {
     image_auth: Option<Arc<crate::auth::AuthManager>>,
     image_generation: u64,
+    image_loading: Option<u64>,
+    image_recency: Vec<String>,
+    media_space: Option<String>,
     rich_items: Vec<(String, crate::model::RichContent)>,
     images: crate::rich_content::Images,
     image_protocol: Option<bmux_image::ImageProtocol>,
@@ -165,6 +168,9 @@ impl App {
         Self {
             image_auth: None,
             image_generation: 0,
+            image_loading: None,
+            image_recency: Vec::new(),
+            media_space: None,
             rich_items: Vec::new(),
             images: crate::rich_content::Images::new(),
             image_protocol: None,
@@ -216,9 +222,16 @@ impl App {
             self.clock_format,
             self.timestamp_format.as_ref(),
         );
+        if self.media_space != self.product.selected_space {
+            self.media_space.clone_from(&self.product.selected_space);
+            self.image_generation = self.image_generation.wrapping_add(1);
+            self.image_loading = None;
+            self.viewer = None;
+            self.rich_focus = None;
+        }
+        self.reconcile_viewer(&projection.rich);
         if self.rich_items != projection.rich {
             self.rich_focus = None;
-            self.viewer = None;
         }
         self.rich_items = projection.rich;
         self.conversation_lines = Arc::new(projection.lines);
@@ -309,11 +322,7 @@ impl App {
             self.follow_conversation_bottom = true;
         }
         sync_space_selection(self);
-        if messages_loaded {
-            Update::reset().with_command(self.load_images())
-        } else {
-            Update::reset()
-        }
+        Update::redraw()
     }
 
     fn enrich_message(&self, message: &ProductMessage) -> Option<Command<AppMessage>> {
@@ -347,8 +356,13 @@ impl App {
     }
 
     fn command_for_effect(&mut self, effect: Effect) -> Option<Command<AppMessage>> {
-        self.image_generation = self.image_generation.wrapping_add(1);
-        self.viewer = None;
+        if self.media_space != self.product.selected_space {
+            self.media_space.clone_from(&self.product.selected_space);
+            self.image_generation = self.image_generation.wrapping_add(1);
+            self.image_loading = None;
+            self.viewer = None;
+            self.rich_items.clear();
+        }
         let token = self.access_token.clone()?;
         let chat = Arc::clone(&self.chat);
         let people = Arc::clone(&self.people);
@@ -430,7 +444,7 @@ impl App {
                     });
                     self.alias_picker = None;
                 }
-                Update::reset()
+                Update::redraw()
             }
             SelectableListOutcome::Focused(_) | SelectableListOutcome::Redraw => Update::redraw(),
             SelectableListOutcome::Ignored => Update::none(),
@@ -461,7 +475,7 @@ impl App {
                     Some(Err(error)) => editor.error = Some(error.to_string()),
                     None => editor.error = Some("Local aliases are unavailable".to_string()),
                 }
-                Update::reset()
+                Update::redraw()
             }
             TextInputOutcome::Edited | TextInputOutcome::Redraw => Update::redraw(),
             TextInputOutcome::Ignored | TextInputOutcome::EdgeUp | TextInputOutcome::EdgeDown => {
@@ -476,7 +490,7 @@ impl App {
                 Some(Action::Quit) => return self.apply_action(Action::Quit),
                 Some(Action::Cancel) => {
                     self.auth_menu = false;
-                    return Update::reset();
+                    return Update::redraw();
                 }
                 Some(Action::MoveDown | Action::FocusNext) => {
                     self.auth_selection = (self.auth_selection + 1) % 3;
@@ -487,7 +501,7 @@ impl App {
                 Some(Action::Activate) => return self.choose_auth(self.auth_selection),
                 _ => {}
             }
-            return Update::reset();
+            return Update::redraw();
         }
         for (index, label) in STORAGE_OPTIONS.iter().enumerate() {
             if Button::new(label).handle_event(
@@ -499,7 +513,7 @@ impl App {
                 return self.choose_auth(index);
             }
         }
-        Update::reset()
+        Update::redraw()
     }
 
     fn choose_auth(&self, selection: usize) -> Update<AppMessage> {
@@ -562,7 +576,7 @@ impl App {
             items,
             state,
         });
-        Update::reset()
+        Update::redraw()
     }
 
     fn handle_thread_activity_event(&mut self, event: &Event) -> Option<Update<AppMessage>> {
@@ -668,14 +682,14 @@ impl App {
                 Some(
                     effect
                         .and_then(|effect| self.command_for_effect(effect))
-                        .map_or_else(Update::reset, |command| {
-                            Update::reset().with_command(command)
+                        .map_or_else(Update::redraw, |command| {
+                            Update::redraw().with_command(command)
                         }),
                 )
             }
             SelectableListOutcome::Focused(_) | SelectableListOutcome::Redraw => {
                 self.focus_spaces_pane();
-                Some(Update::reset())
+                Some(Update::redraw())
             }
             SelectableListOutcome::Ignored => None,
         }
@@ -697,14 +711,14 @@ impl App {
             ) == ButtonOutcome::Pressed
         {
             self.auth_menu = true;
-            return Update::reset();
+            return Update::redraw();
         }
         if self.alias_picker.is_some() {
             if let Event::Key(stroke) = event
                 && self.bindings.action_for(stroke) == Some(Action::Cancel)
             {
                 self.alias_picker = None;
-                return Update::reset();
+                return Update::redraw();
             }
             return self.handle_alias_picker(&event);
         }
@@ -713,7 +727,7 @@ impl App {
                 && self.bindings.action_for(stroke) == Some(Action::Cancel)
             {
                 self.alias_editor = None;
-                return Update::reset();
+                return Update::redraw();
             }
             return self.handle_alias_editor(&event);
         }
@@ -725,7 +739,7 @@ impl App {
                 )
             {
                 self.help_visible = false;
-                return Update::reset();
+                return Update::redraw();
             }
             return Update::none();
         }
@@ -753,11 +767,11 @@ impl App {
         );
         if matches!(help_outcome, ButtonOutcome::Pressed) {
             self.help_visible = !self.help_visible;
-            return Update::reset();
+            return Update::redraw();
         }
         if help_outcome.is_handled() {
             return if help_outcome.needs_redraw() {
-                Update::reset()
+                Update::redraw()
             } else {
                 Update::none()
             };
@@ -779,7 +793,7 @@ impl App {
         if !matches!(pane_outcome, PaneOutcome::Ignored)
             || !matches!(conversation_outcome, PaneOutcome::Ignored)
         {
-            return Update::reset();
+            return Update::redraw();
         }
 
         let routed = self.interactions.route(event);
@@ -788,7 +802,7 @@ impl App {
             || routed.hover_left.is_some()
             || routed.hover_entered.is_some()
         {
-            Update::reset()
+            Update::redraw()
         } else {
             Update::none()
         }
@@ -847,16 +861,18 @@ impl App {
             },
             Action::Authenticate => {
                 self.auth_menu = true;
-                Update::reset()
+                Update::redraw()
             }
             Action::SetSenderAlias => self.open_alias_editor(),
-            Action::Refresh => self
-                .product
-                .refresh()
-                .and_then(|effect| self.command_for_effect(effect))
-                .map_or_else(Update::reset, |command| {
-                    Update::reset().with_command(command)
-                }),
+            Action::Refresh => {
+                self.images.retain(|_, result| result.is_ok());
+                self.product
+                    .refresh()
+                    .and_then(|effect| self.command_for_effect(effect))
+                    .map_or_else(Update::redraw, |command| {
+                        Update::redraw().with_command(command)
+                    })
+            }
             Action::Activate => {
                 let effect = if let Some(index) = self.spaces.selected()
                     && let Some(space) = self.product.spaces.get(index)
@@ -867,13 +883,13 @@ impl App {
                 };
                 effect
                     .and_then(|effect| self.command_for_effect(effect))
-                    .map_or_else(Update::reset, |command| {
-                        Update::reset().with_command(command)
+                    .map_or_else(Update::redraw, |command| {
+                        Update::redraw().with_command(command)
                     })
             }
             Action::Help => {
                 self.help_visible = !self.help_visible;
-                Update::reset()
+                Update::redraw()
             }
             Action::FocusNext | Action::FocusPrevious => {
                 self.focused_pane = match self.focused_pane {
@@ -883,7 +899,7 @@ impl App {
                 self.space_pane.interaction.focused = self.focused_pane == FocusedPane::Spaces;
                 self.conversation_pane.interaction.focused =
                     self.focused_pane == FocusedPane::Conversation;
-                Update::reset()
+                Update::redraw()
             }
             Action::MoveDown if self.focused_pane == FocusedPane::Conversation => {
                 self.follow_conversation_bottom = false;
@@ -919,13 +935,13 @@ impl App {
                     .min(item_count.saturating_sub(1));
                 self.spaces.set_focused(Some(next));
                 self.spaces.set_selected(Some(next));
-                Update::reset()
+                Update::redraw()
             }
             Action::MoveUp => {
                 let previous = self.spaces.focused().unwrap_or(0).saturating_sub(1);
                 self.spaces.set_focused(Some(previous));
                 self.spaces.set_selected(Some(previous));
-                Update::reset()
+                Update::redraw()
             }
         }
     }
@@ -934,6 +950,13 @@ impl App {
 impl Program for App {
     type Message = AppMessage;
     type Error = std::io::Error;
+
+    fn presentation_committed(
+        &mut self,
+        _report: bmux_tui_runtime::PresentReport,
+    ) -> Update<AppMessage> {
+        self.schedule_images()
+    }
 
     fn update(
         &mut self,
@@ -953,7 +976,7 @@ impl Program for App {
                     self.rebuild_projections();
                     sync_space_selection(self);
                 }
-                Ok(Update::reset().with_command(sweep_timer(delay)))
+                Ok(Update::redraw().with_command(sweep_timer(delay)))
             }
             RuntimeEvent::Message(AppMessage::Poll) => {
                 if !self.auth_menu
@@ -1000,11 +1023,9 @@ impl Program for App {
                     self.follow_conversation_bottom = true;
                 }
                 sync_space_selection(self);
-                Ok(enrichment
-                    .map_or_else(Update::reset, |command| {
-                        Update::reset().with_command(command)
-                    })
-                    .with_command(self.load_images()))
+                Ok(enrichment.map_or_else(Update::redraw, |command| {
+                    Update::redraw().with_command(command)
+                }))
             }
             RuntimeEvent::Message(AppMessage::NamesResolved {
                 current_user,
@@ -1029,7 +1050,8 @@ impl Program for App {
                 images,
             }) => {
                 if generation == self.image_generation && space == self.product.selected_space {
-                    self.images = images;
+                    self.image_loading = None;
+                    self.merge_images(images);
                 }
                 Ok(Update::redraw())
             }
@@ -1195,8 +1217,8 @@ fn startup_update(app: &mut App) -> Update<AppMessage> {
     // never been scheduled and is therefore intentionally superseded.
     let effect = app.product.load_spaces();
     app.command_for_effect(effect)
-        .map_or_else(Update::reset, |command| {
-            Update::reset().with_command(command)
+        .map_or_else(Update::redraw, |command| {
+            Update::redraw().with_command(command)
         })
 }
 
@@ -2667,6 +2689,78 @@ mod tests {
         assert!(app.viewer.is_some());
         let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 30));
         assert!(buffer.cells().iter().any(|cell| cell.symbol == "F"));
+    }
+
+    #[test]
+    fn polling_preserves_expanded_media_and_does_not_reset_presenter() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.rich_items = vec![(
+            "line-1".into(),
+            crate::model::RichContent {
+                title: "Synthetic image".into(),
+                text: String::new(),
+                image_url: Some("https://example.com/image.png".into()),
+                links: Vec::new(),
+            },
+        )];
+        app.focused_pane = FocusedPane::Conversation;
+        let activate = app.bindings.labels_for(Action::Activate)[0]
+            .parse::<crate::keybind::KeyChord>()
+            .unwrap()
+            .stroke();
+        app.update_terminal(Event::Key(activate));
+        assert!(app.viewer.is_some());
+        let generation = app.image_generation;
+        app.command_for_effect(Effect::LoadMessages {
+            request_id: 99,
+            space_name: "spaces/synthetic".into(),
+            page_token: None,
+        });
+        assert!(app.viewer.is_some());
+        assert_eq!(app.image_generation, generation);
+        let mut items = app.rich_items.clone();
+        items[0].0 = "line-100".into();
+        app.reconcile_viewer(&items);
+        assert!(app.viewer.is_some());
+    }
+
+    #[test]
+    fn expanded_media_beyond_first_sixteen_is_scheduled_once_and_cache_is_bounded() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.rich_items = (0..40)
+            .map(|index| {
+                (
+                    format!("line-{index}"),
+                    crate::model::RichContent {
+                        title: format!("Image {index}"),
+                        text: String::new(),
+                        image_url: Some(format!("https://example.com/{index}.png")),
+                        links: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        app.focused_pane = FocusedPane::Conversation;
+        app.rich_focus = Some(39);
+        let activate = app.bindings.labels_for(Action::Activate)[0]
+            .parse::<crate::keybind::KeyChord>()
+            .unwrap()
+            .stroke();
+        app.update_terminal(Event::Key(activate));
+        app.schedule_images();
+        assert!(app.image_loading.is_some());
+        let generation = app.image_generation;
+        app.schedule_images();
+        assert_eq!(app.image_generation, generation);
+        for index in 0..40 {
+            let url = format!("https://example.com/{index}.png");
+            app.image_recency.push(url.clone());
+            app.images
+                .insert(url, Err(crate::rich_content::ImageError::Network));
+        }
+        app.trim_images();
+        assert_eq!(app.images.len(), 32);
+        assert!(app.images.contains_key("https://example.com/39.png"));
     }
 
     #[test]
