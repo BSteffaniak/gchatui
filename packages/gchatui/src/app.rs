@@ -580,6 +580,16 @@ impl App {
     }
 
     fn handle_thread_activity_event(&mut self, event: &Event) -> Option<Update<AppMessage>> {
+        if matches!(event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Drag(_)))
+        {
+            return None;
+        }
+        if event
+            .key()
+            .is_some_and(|stroke| self.bindings.action_for(stroke) != Some(Action::Activate))
+        {
+            return None;
+        }
         let route = self.interactions.route(event.clone());
         let target = route.target.as_ref()?.as_str();
         if let Some(update) = self.rich_target(target, event) {
@@ -743,6 +753,9 @@ impl App {
             }
             return Update::none();
         }
+        if let Some(update) = self.handle_direct_wheel(&event) {
+            return update;
+        }
         if let Some(update) = self.handle_thread_activity_event(&event) {
             return update;
         }
@@ -752,9 +765,6 @@ impl App {
             return self.apply_action(action);
         }
 
-        if let Some(update) = self.handle_direct_wheel(&event) {
-            return update;
-        }
         if let Some(update) = self.handle_space_event(&event) {
             return update;
         }
@@ -2689,6 +2699,56 @@ mod tests {
         assert!(app.viewer.is_some());
         let buffer = render_to_buffer(&mut app, Rect::new(0, 0, 100, 30));
         assert!(buffer.cells().iter().any(|cell| cell.symbol == "F"));
+    }
+
+    #[test]
+    fn wheel_over_rich_preview_scrolls_and_remains_scrolled_after_render() {
+        let mut app = App::new(KeybindingRegistry::default());
+        app.product.phase = Phase::Ready;
+        app.product.messages = (0..20)
+            .map(|index| crate::model::Message {
+                id: crate::model::MessageId(format!("synthetic-{index}")),
+                thread_id: None,
+                sender: None,
+                text: "Synthetic message".into(),
+                create_time: String::new(),
+                is_thread_reply: false,
+                unsupported_content: false,
+                rich_content: vec![crate::model::RichContent {
+                    title: "Image".into(),
+                    text: String::new(),
+                    image_url: Some(format!("https://example.com/{index}.png")),
+                    links: Vec::new(),
+                }],
+            })
+            .collect();
+        app.rebuild_projections();
+        app.follow_conversation_bottom = true;
+        let area = Rect::new(0, 0, 100, 30);
+        render_to_buffer(&mut app, area);
+        let (_, hits) = render_to_buffer_and_hits(&mut app, area);
+        app.interactions.commit_scene(hits, None);
+        let before = app.conversation_view.scroll.vertical_offset();
+        assert!(before > 3);
+        let content = conversation_content_area(app.conversation_pane.area);
+        let row = app
+            .rich_items
+            .iter()
+            .filter_map(|(key, _)| app.conversation_view.item_offset(key))
+            .find(|offset| *offset >= before && *offset < before + u64::from(content.height))
+            .unwrap();
+        let point = Point::new(
+            content.x + 2,
+            content.y + u16::try_from(row - before).unwrap(),
+        );
+        app.update_terminal(Event::Mouse(MouseEvent::new(
+            MouseEventKind::ScrollUp,
+            point,
+        )));
+        assert_eq!(app.conversation_view.scroll.vertical_offset(), before - 3);
+        render_to_buffer(&mut app, area);
+        assert_eq!(app.conversation_view.scroll.vertical_offset(), before - 3);
+        assert!(app.viewer.is_none());
     }
 
     #[test]
