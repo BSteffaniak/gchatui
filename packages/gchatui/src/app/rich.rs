@@ -71,11 +71,25 @@ impl App {
             };
             let url = self.image_recency.remove(index);
             self.images.remove(&url);
+            tracing::info!(target: "gchatui::diagnostics", cached_count = self.images.len(), reason = "capacity", "image_cache_evicted");
         }
     }
 
     pub(super) fn schedule_images(&mut self) -> Update<AppMessage> {
         let wanted = self.wanted_images();
+        let ready = wanted
+            .iter()
+            .filter(|url| matches!(self.images.get(*url), Some(Ok(_))))
+            .count();
+        let missing = wanted
+            .iter()
+            .filter(|url| !self.images.contains_key(*url))
+            .count();
+        let state = (wanted.len(), ready, missing, self.image_loading.is_some());
+        if self.image_cache_report != Some(state) {
+            tracing::info!(target: "gchatui::diagnostics", visible = state.0, ready, missing, in_flight = state.3, "image_cache_state");
+            self.image_cache_report = Some(state);
+        }
         self.image_recency
             .retain(|url| self.images.contains_key(url) || wanted.contains(url));
         for url in &wanted {
@@ -356,7 +370,12 @@ fn paint_image(app: &App, frame: &mut PaintCx<'_, '_>, url: &str, area: Rect, ke
     if app.image_protocol.is_some()
         && let Some(Ok(payload)) = app.images.get(url)
     {
-        let (width, height) = match payload.as_ref() {
+        let payload = if key == "expanded-image" {
+            &payload.full
+        } else {
+            &payload.preview
+        };
+        let (width, height) = match payload {
             ImagePayload::Pixels { width, height, .. }
             | ImagePayload::Png { width, height, .. } => (*width, *height),
         };
@@ -370,7 +389,7 @@ fn paint_image(app: &App, frame: &mut PaintCx<'_, '_>, url: &str, area: Rect, ke
             .min(u32::from(area.height));
         frame.push_image(ImageContribution::Present(ImagePlacement {
             key: ImageKey::new(key),
-            payload: payload.as_ref().clone(),
+            payload: payload.clone(),
             destination: Rect::new(
                 area.x,
                 area.y,
@@ -489,5 +508,63 @@ pub(super) fn paint_viewer(app: &mut App, frame: &mut PaintCx<'_, '_>) {
                 list.paint(Rect::new(0, 0, body.width, body.height), &viewer.scroll, cx);
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_preview_paints_without_pending_or_scheduling_network() {
+        let mut app = App::new(crate::keybind::KeybindingRegistry::default());
+        let url = "https://example.com/synthetic.png";
+        let payload = ImagePayload::Pixels {
+            bytes: vec![0; 16],
+            width: 2,
+            height: 2,
+            format: bmux_tui::image::ImagePixelFormat::Rgba8,
+        };
+        app.images.insert(
+            url.into(),
+            Ok(std::sync::Arc::new(crate::rich_content::DecodedImage {
+                full: payload.clone(),
+                preview: payload,
+            })),
+        );
+        app.image_protocol = Some(bmux_image::ImageProtocol::KittyGraphics);
+        app.viewer = Some(Viewer {
+            content: crate::model::RichContent {
+                title: "Synthetic".into(),
+                text: String::new(),
+                image_url: Some(url.into()),
+                links: Vec::new(),
+            },
+            scroll: VirtualListState::new(0),
+            close: ButtonState::new(),
+            links: Vec::new(),
+            selected: 0,
+        });
+        let generation = app.image_generation;
+        app.schedule_images();
+        assert_eq!(app.image_generation, generation);
+        assert!(app.image_loading.is_none());
+        let mut buffer = bmux_tui::buffer::Buffer::empty(Rect::new(0, 0, 40, 8));
+        {
+            let mut frame = bmux_tui::frame::Frame::new(&mut buffer);
+            paint_image(
+                &app,
+                &mut PaintCx::new(&mut frame),
+                url,
+                Rect::new(0, 0, 40, 8),
+                "inline-test",
+            );
+        }
+        let text = buffer
+            .cells()
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        assert!(!text.contains("pending"));
     }
 }

@@ -96,6 +96,7 @@ pub enum AppMessage {
 
 pub struct App {
     image_auth: Option<Arc<crate::auth::AuthManager>>,
+    image_cache_report: Option<(usize, usize, usize, bool)>,
     image_generation: u64,
     image_loading: Option<u64>,
     image_recency: Vec<String>,
@@ -167,6 +168,7 @@ impl App {
     pub fn new(bindings: KeybindingRegistry) -> Self {
         Self {
             image_auth: None,
+            image_cache_report: None,
             image_generation: 0,
             image_loading: None,
             image_recency: Vec::new(),

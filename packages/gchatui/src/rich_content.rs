@@ -6,7 +6,13 @@ use std::sync::Arc;
 use bmux_tui::image::{ImagePayload, ImagePixelFormat};
 use bmux_tui::prelude::{Line, Modifier, Span, Style};
 
-pub type Images = BTreeMap<String, Result<Arc<ImagePayload>, ImageError>>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedImage {
+    pub full: ImagePayload,
+    pub preview: ImagePayload,
+}
+
+pub type Images = BTreeMap<String, Result<Arc<DecodedImage>, ImageError>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageError {
@@ -238,7 +244,7 @@ const MAX_BYTES: usize = 16 * 1024 * 1024;
 async fn fetch(
     value: &str,
     auth: Option<&crate::auth::AuthManager>,
-) -> Result<ImagePayload, ImageError> {
+) -> Result<DecodedImage, ImageError> {
     let mut url = url::Url::parse(value).map_err(|_| ImageError::UnsafeUrl)?;
     let mut may_authenticate = authenticated_media(&url);
     for redirect_count in 0..6 {
@@ -364,7 +370,7 @@ fn decode_response(
     bytes: &[u8],
     status: u16,
     kind: &'static str,
-) -> Result<ImagePayload, ImageError> {
+) -> Result<DecodedImage, ImageError> {
     let format = image::guess_format(bytes).ok();
     let format_name = match format {
         Some(image::ImageFormat::Png) => "PNG",
@@ -408,11 +414,16 @@ fn decode_response(
         })?
         .thumbnail(1024, 1024)
         .to_rgba8();
-    Ok(ImagePayload::Pixels {
+    let preview = image::imageops::thumbnail(&image, 320, 192);
+    let payload = |image: image::RgbaImage| ImagePayload::Pixels {
         width: image.width(),
         height: image.height(),
         bytes: image.into_raw(),
         format: ImagePixelFormat::Rgba8,
+    };
+    Ok(DecodedImage {
+        full: payload(image),
+        preview: payload(preview),
     })
 }
 
@@ -520,6 +531,30 @@ mod tests {
         let error = decode_response(&bytes.into_inner(), 200, "image/png").unwrap_err();
         assert!(error.details().contains("dimension or memory limits"));
         assert!(error.details().contains("Detected format: PNG"));
+    }
+
+    #[test]
+    fn decoded_cache_keeps_small_preview_and_full_expansion() {
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1024, 1024)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let decoded = decode_response(&bytes.into_inner(), 200, "image/png").unwrap();
+        let ImagePayload::Pixels {
+            width,
+            height,
+            bytes,
+            ..
+        } = decoded.preview
+        else {
+            panic!("pixel preview")
+        };
+        assert!(width <= 320 && height <= 192);
+        assert!(bytes.len() <= 320 * 192 * 4);
+        let ImagePayload::Pixels { width, height, .. } = decoded.full else {
+            panic!("full pixels")
+        };
+        assert_eq!((width, height), (1024, 1024));
     }
 
     #[test]
