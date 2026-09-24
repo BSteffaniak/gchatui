@@ -516,6 +516,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cached_image_revisit_presenter_measurement() {
+        use bmux_tui_runtime::Presenter;
+        let mut app = App::new(crate::keybind::KeybindingRegistry::default());
+        let url = "https://example.com/synthetic.png";
+        let pixels = |width, height| ImagePayload::Pixels {
+            bytes: vec![127; width as usize * height as usize * 4],
+            width,
+            height,
+            format: bmux_tui::image::ImagePixelFormat::Rgba8,
+        };
+        app.images.insert(
+            url.into(),
+            Ok(std::sync::Arc::new(crate::rich_content::DecodedImage {
+                full: pixels(1024, 1024),
+                preview: pixels(192, 192),
+            })),
+        );
+        app.image_protocol = Some(bmux_image::ImageProtocol::KittyGraphics);
+        let terminal =
+            bmux_tui::terminal::Terminal::new(Vec::<u8>::new(), Rect::new(0, 0, 120, 40));
+        let mut presenter = bmux_tui_runtime::ImageTerminalPresenter::new(
+            terminal,
+            |visible: &mut bool, cx: &mut PaintCx<'_, '_>| {
+                if *visible {
+                    paint_image(&app, cx, url, Rect::new(0, 0, 80, 30), "expanded-image");
+                }
+            },
+            bmux_image::HostImageCapabilities {
+                kitty_graphics: true,
+                ..Default::default()
+            },
+            bmux_image::ImageConfig::default(),
+        );
+        for (stage, visible) in [
+            ("first", true),
+            ("unchanged", true),
+            ("hidden", false),
+            ("revisit", true),
+        ] {
+            let before = presenter.terminal().writer().len();
+            let start = std::time::Instant::now();
+            presenter.present(&mut { visible }).unwrap();
+            let written = presenter.terminal().writer().len() - before;
+            if stage == "unchanged" {
+                assert!(written < 1024, "unchanged image must not retransmit pixels");
+            }
+            if stage == "revisit" {
+                assert!(
+                    written > 4 * 1024 * 1024,
+                    "reproduction expects pinned bmux to retransmit the cached image"
+                );
+            }
+            eprintln!(
+                "synthetic_image stage={stage} elapsed_us={} output_bytes={}",
+                start.elapsed().as_micros(),
+                presenter.terminal().writer().len() - before
+            );
+        }
+    }
+
+    #[test]
     fn cached_preview_paints_without_pending_or_scheduling_network() {
         let mut app = App::new(crate::keybind::KeybindingRegistry::default());
         let url = "https://example.com/synthetic.png";
